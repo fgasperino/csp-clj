@@ -1,0 +1,7 @@
+.clj-kondo
+.clojure-mcp
+.cpcache
+.lsp
+target/
+*.jar
+pom.xml
