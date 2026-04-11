@@ -194,6 +194,91 @@
    See also: csp-clj.channels/into-chan!"
   channels/into-chan!)
 
+(def multiplex
+  "Creates a multiplexer for fan-out from a source channel.
+   
+   The multiplexer runs a background virtual thread that continually reads
+   from the source channel and distributes each value to all registered
+   tap channels. If a tap channel blocks (buffer full or unbuffered), the
+   mult blocks from taking the next value until all taps have accepted
+   (backpressure).
+   
+   When the source channel closes, the mult thread exits and will close
+   all taps that were registered with close? = true.
+   
+   Parameters:
+     - source-ch: the source channel to multiplex from
+   
+   Returns:
+     A multiplexer implementing csp-clj.protocols.multiplexer/Multiplexer
+   
+   Example:
+     (def source (channel))
+     (def m (multiplex source))
+     (def tap-ch (channel 10))
+     (tap! m tap-ch)
+     => #csp_clj.channels.multiplexer.Multiplexer{...}
+   
+   See also: csp-clj.channels/multiplex, tap!, untap!"
+  channels/multiplex)
+
+(def tap!
+  "Registers a tap channel on a multiplexer.
+   
+   When the multiplexer's source channel receives a value, it will be
+   put! onto all registered tap channels concurrently.
+   
+   Parameters:
+     - mult: the multiplexer
+     - ch: the channel to receive values
+     - close?: if true (default), closes ch when source closes
+   
+   Returns:
+     The tap channel
+   
+   Example:
+     (tap! m tap-ch)
+     (tap! m tap-ch false)  ; don't close with source
+     => tap-ch
+   
+   See also: csp-clj.channels/tap!, multiplex, untap!"
+  channels/tap!)
+
+(def untap!
+  "Removes a tap channel from a multiplexer.
+   
+   The tap channel will no longer receive values from the multiplexer.
+   
+   Parameters:
+     - mult: the multiplexer
+     - ch: the tap channel to remove
+   
+   Returns:
+     nil
+   
+   Example:
+     (untap! m tap-ch)
+     => nil
+   
+   See also: csp-clj.channels/untap!, tap!, untap-all!"
+  channels/untap!)
+
+(def untap-all!
+  "Removes all tap channels from a multiplexer.
+   
+   Parameters:
+     - mult: the multiplexer
+   
+   Returns:
+     nil
+   
+   Example:
+     (untap-all! m)
+     => nil
+   
+   See also: csp-clj.channels/untap-all!, tap!, untap!"
+  channels/untap-all!)
+
 (def pub!
   "Creates a publisher for topic-based message distribution.
    
