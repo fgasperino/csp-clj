@@ -58,28 +58,20 @@ Unbuffered channels require both sender and receiver to be present simultaneousl
 
 (def request-ch (csp/channel))
 
-;; Server process - runs in background virtual thread
+;; Consumer process 
 (future
   ;; take! BLOCKS here until client puts a request
-  ;; This is the rendezvous point - server waits for client
+  ;; This is the rendezvous point - producer waits for consumer
   (let [request (csp/take! request-ch)]
-    ;; Once client and server meet, process the request
-    (println "Server received:" request)
-    ;; Simulate some work
-    (Thread/sleep 100)
-    (println "Server processed request")))
+    (println "Consumer received:" request)))
 
-;; Client process - runs in background virtual thread
+;; Producer process
 (future
-  ;; put! BLOCKS here until server is ready to take
+  ;; put! BLOCKS here until consumer is ready to take
   ;; This is the other side of the rendezvous
-  (csp/put! request-ch "Hello Server")
+  (csp/put! request-ch "Hello from producer")
   ;; Only proceeds after server has accepted the value
-  (println "Client: request acknowledged"))
-
-;; Both futures block until the rendezvous completes
-;; Virtual threads make this blocking cheap - no thread pool exhaustion
-(Thread/sleep 200)  ; Wait for completion
+  (println "Producer exiting."))
 ```
 
 This synchronous handoff is useful when:
@@ -98,8 +90,7 @@ Buffered channels allow the sender to proceed if buffer space is available. The 
 ;; The buffer acts as a queue between them
 (def work-queue (csp/channel 5))
 
-;; PRODUCER: Can put up to 5 items without blocking
-;; This runs in a background virtual thread
+;; producer: Can put up to 5 items without blocking
 (future
   (println "Producer: starting...")
   ;; First 5 puts complete immediately (buffer has space)
@@ -117,7 +108,6 @@ Buffered channels allow the sender to proceed if buffer space is available. The 
   (csp/close! work-queue))
 
 ;; CONSUMER: Drains the queue slowly
-;; This runs in a background virtual thread
 (future
   (println "Consumer: starting...")
   ;; Process items with delay to demonstrate buffering
@@ -322,24 +312,6 @@ This example shows one producer distributing work to two consumers in round-robi
 (def result-ch (csp/channel 10)) ; Collect results
 (def active-workers (atom 2))    ; Track active worker count
 
-;; PRODUCER: generates work items
-;; Fills buffer, then blocks until consumers create space
-(future
-  (println "[Producer] Starting...")
-  (doseq [i (range 10)]
-    ;; Create task
-    (let [task (str "Task-" i)]
-      ;; put! blocks only if buffer is full
-      ;; Buffer size of 6 means first 6 puts are non-blocking
-      ;; 7th+ put blocks until a consumer takes an item
-      (csp/put! work-ch task)
-      (println "[Producer] Sent" task 
-               (if (< i 6) "(buffered)" "(blocked, waited for space)"))))
-  ;; Signal completion by closing work channel
-  ;; Consumers will finish processing buffered items, then exit
-  (println "[Producer] Finished sending all tasks")
-  (csp/close! work-ch))
-
 ;; CONSUMER 1: Worker that processes tasks
 ;; Round-robin: handles tasks where index mod 2 = 0 (0, 2, 4, 6, 8)
 (future
@@ -349,11 +321,6 @@ This example shows one producer distributing work to two consumers in round-robi
     ;; - Work available in buffer, OR
     ;; - Channel closed (returns nil)
     (when-let [work (csp/take! work-ch)]
-      ;; Round-robin: only process even-indexed tasks
-      ;; Task 0 -> Worker 1
-      ;; Task 1 -> Worker 2
-      ;; Task 2 -> Worker 1
-      ;; etc.
       (if (even? task-num)
         (do
           (println "[Worker-1] Processing" work)
@@ -363,7 +330,7 @@ This example shows one producer distributing work to two consumers in round-robi
           (csp/put! result-ch (str "[Worker-1] completed " work))
           (println "[Worker-1] Finished" work))
         ;; Not our task - we still took it from channel to advance the queue
-        ;; In a real system, you might put it back or use a different distribution
+        ;; In a real system, use a different distribution
         (println "[Worker-1] Skipped" work "(odd index, not mine)"))
       ;; Continue to next task
       (recur (inc task-num))))
@@ -395,6 +362,24 @@ This example shows one producer distributing work to two consumers in round-robi
   (println "[Worker-2] No more work, shutting down")
   ;; Signal this worker is done
   (swap! active-workers dec))
+
+;; PRODUCER: generates work items
+;; Fills buffer, then blocks until consumers create space
+(future
+  (println "[Producer] Starting...")
+  (doseq [i (range 10)]
+    ;; Create task
+    (let [task (str "Task-" i)]
+      ;; put! blocks only if buffer is full
+      ;; Buffer size of 6 means first 6 puts are non-blocking
+      ;; 7th+ put blocks until a consumer takes an item
+      (csp/put! work-ch task)
+      (println "[Producer] Sent" task 
+               (if (< i 6) "(buffered)" "(blocked, waited for space)"))))
+  ;; Signal completion by closing work channel
+  ;; Consumers will finish processing buffered items, then exit
+  (println "[Producer] Finished sending all tasks")
+  (csp/close! work-ch))
 
 ;; Wait for all work to be processed
 (println "\n[Main] Waiting for workers to finish...")
@@ -657,14 +642,29 @@ Unlike core.async `alts!`, csp-clj uses `select!` with an explicit return format
 #### Basic Usage
 
 ```clojure
+(def ch1 (csp/channel 10))
+(def ch2 (csp/channel 10))
+
+;; Add a value to a channel.
+(csp/put! ch1 :first)
+
 ;; Take from first available channel
 (csp/select! [[ch1 :take] [ch2 :take]])
 
 ;; Put to first available channel
 (csp/select! [[ch1 :put :val] [ch2 :put :val]])
 
+;; One of the channels got the value. The other will timeout.
+(csp/take! ch1 500)
+(csp/take! ch2 500)
+
+(csp/put! ch1 :second)
+
 ;; Mixed operations
 (csp/select! [[ch1 :take] [ch2 :put :val]])
+
+(csp/take! ch1 500)
+(csp/take! ch2 500)
 
 ;; With timeout - returns :timeout if no operation ready
 (csp/select! [[ch1 :take] [ch2 :take]] {:timeout 1000})
@@ -701,18 +701,20 @@ This example implements a work dispatcher that sends tasks to the first availabl
   (println "[Dispatcher] Starting...")
   (loop [count 0]
     ;; take! blocks until work request arrives
-    (when-let [work (csp/take! work-requests)]
-      ;; select! chooses first worker with available buffer space
-      ;; Non-deterministic = natural load balancing
-      (let [[ch op _] (csp/select!
-                        [[worker-1 :put work]
-                         [worker-2 :put work]
-                         [worker-3 :put work]])]
-        (cond
-          (= ch worker-1) (println "[Dispatcher] Sent" work "to Worker-1")
-          (= ch worker-2) (println "[Dispatcher] Sent" work "to Worker-2")
-          (= ch worker-3) (println "[Dispatcher] Sent" work "to Worker-3"))
-        (recur (inc count)))))
+    (if-let [work (csp/take! work-requests)]
+        ;; select! chooses first worker with available buffer space
+        ;; Non-deterministic = natural load balancing
+        (let [[ch op _] (csp/select!
+                         [[worker-1 :put work]
+                          [worker-2 :put work]
+                          [worker-3 :put work]])]
+          (cond
+            (= ch worker-1) (println "[Dispatcher] Sent" work "to Worker-1")
+            (= ch worker-2) (println "[Dispatcher] Sent" work "to Worker-2")
+            (= ch worker-3) (println "[Dispatcher] Sent" work "to Worker-3"))
+          (recur (inc count)))
+        (doseq [ch [worker-1 worker-2 worker-3]]
+          (csp/close! ch))))
   (println "[Dispatcher] Work requests channel closed, shutting down"))
 
 ;; WORKER 1: Processes tasks from its inbox
@@ -845,22 +847,53 @@ Unlike core.async's pipeline which uses a similar approach, csp-clj explicitly d
 #### Basic Usage
 
 ```clojure
-;; Basic pipeline with 4-way parallelism
-(csp/pipeline 
-  4                                    ; parallelism: 4 concurrent operations
-  output-ch                            ; output channel
-  (map inc)                            ; transducer to apply
-  input-ch)                            ; input channel
+(def input-ch (csp/channel 5))
+(def output-ch (csp/channel 5))
+
+(csp/pipeline
+ 2             ; parallelism: 2 concurrent operations
+ output-ch     ; output channel
+ (map inc)     ; transducer to apply
+ input-ch)     ; input channel
+
+(csp/put! input-ch 1)
+(csp/take! output-ch)
+
+(csp/put! input-ch 2)
+(csp/take! output-ch)
+
+;; Shutdown the pipeline by closing the input.
+(csp/close! input-ch)
+(csp/take! output-ch 1000)
+
+(def input-ch (csp/channel 5))
+(def output-ch (csp/channel 5))
 
 ;; With options
-(csp/pipeline 
-  8
-  output-ch
-  (filter even?)
-  input-ch
-  {:close? false                       ; don't close output when input closes
-   :executor :io                       ; use I/O executor for blocking work
-   :ex-handler (fn [e] (println e))})  ; handle exceptions
+(csp/pipeline
+ 2
+ output-ch
+ (comp 
+   (filter even?)
+   (map inc))
+ input-ch
+ {:close? false                       ; don't close output when input closes
+  :executor :io                       ; use I/O executor for blocking work
+  :ex-handler (fn [e] (println e))})  ; handle exceptions
+
+;; value is odd
+(csp/put! input-ch 1)
+(csp/take! output-ch 1000)
+
+;; value is even
+(csp/put! input-ch 2)
+(csp/take! output-ch 1000)
+
+;; Value will throw
+(csp/put! input-ch :invalid)
+(csp/take! output-ch 1000)
+
+(csp/close! input-ch)
 ```
 
 **Parameters**:
