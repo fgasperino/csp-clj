@@ -17,13 +17,13 @@ Key differences from core.async:
 Lein:
 
 ```clojure
-[org.clojars.fgasperino/csp-clj "0.0.0"]
+[org.clojars.fgasperino/csp-clj "0.0.1"]
 ```
 
 deps.edn:
 
 ```clojure
-{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.0"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.1"}}}
 ```
 
 ## Requirements
