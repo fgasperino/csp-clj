@@ -21,9 +21,10 @@
    Called by: csp-clj.channels/pipeline, csp-clj.core/pipeline"
   (:require
    [csp-clj.protocols.channel :as channel-protocol]
-   [csp-clj.channels.buffered :as buffered])
+   [csp-clj.channels.buffered :as buffered]
+   [csp-clj.executors :as executors])
   (:import
-   [java.util.concurrent Executors ExecutorService CompletableFuture]))
+   [java.util.concurrent ExecutorService CompletableFuture]))
 
 (set! *warn-on-reflection* true)
 
@@ -107,27 +108,6 @@
 ;;
 ;; See also: csp-clj.channels.buffered, java.util.concurrent.CompletableFuture
 
-;; Shared work-stealing executor for CPU-bound tasks.
-;; Used by default for pipeline processing.
-;;
-;; WHY SHARED (defonce):
-;; - Prevents thread pool explosion when many pipelines created
-;; - Reuses ForkJoinPool.commonPool threads efficiently
-;; - Lifecycle: Created once, lives until JVM exit
-;;
-;; WHY NEVER SHUTDOWN:
-;; - Shutdown would break other running pipelines
-;; - To stop processing: close input/output channels
-;; - Threads exit gracefully, executor remains for reuse
-(defonce ^:private cpu-executor (Executors/newWorkStealingPool))
-
-;; Shared virtual thread executor for I/O-bound tasks.
-;; Used when :io executor option specified.
-;;
-;; Virtual threads are cheap to create, but we still share
-;; the executor to manage lifecycle consistently with :cpu.
-(defonce ^:private io-executor (Executors/newVirtualThreadPerTaskExecutor))
-
 (defn- get-executor
   "Returns the appropriate executor based on option.
    
@@ -143,11 +123,11 @@
    Called by: pipeline"
   ^ExecutorService [executor-opt]
   (case executor-opt
-    :cpu cpu-executor
-    :io io-executor
+    :cpu executors/cpu-executor
+    :io executors/io-executor
     (if (instance? ExecutorService executor-opt)
       executor-opt
-      cpu-executor)))
+      executors/cpu-executor)))
 
 (defn- default-ex-handler
   "Default exception handler for pipeline errors.

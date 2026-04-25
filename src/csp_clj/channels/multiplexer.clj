@@ -20,9 +20,10 @@
    Called by: csp-clj.channels/multiplex, csp-clj.core/multiplex"
   (:require
    [csp-clj.protocols.channel :as protocol-channel]
-   [csp-clj.protocols.multiplexer :as protocol-multiplexer])
+   [csp-clj.protocols.multiplexer :as protocol-multiplexer]
+   [csp-clj.executors :as executors])
   (:import
-   [java.util.concurrent ConcurrentHashMap Executors]))
+   [java.util.concurrent ConcurrentHashMap]))
 
 (set! *warn-on-reflection* true)
 
@@ -158,7 +159,8 @@
                 (when close?
                   (protocol-channel/close! tap-ch)))
               (.clear taps)
-              (.close executor))
+              ;; Note: executor is NOT closed - it may be shared across multiplexers
+              )
             ;; Value received - dispatch to all taps
             ;; TOCTOU-SAFE SNAPSHOT: Create immutable view of current taps
             ;; ConcurrentHashMap iterator is weakly consistent - safe to snapshot
@@ -206,7 +208,8 @@
           (when close?
             (protocol-channel/close! tap-ch)))
         (.clear taps)
-        (.close executor)))))
+        ;; Note: executor is NOT closed - it may be shared across multiplexers
+              ))))
 
 (defn create
   "Creates and returns a mult(iplexer) for the given source channel.
@@ -253,8 +256,7 @@
      - csp-clj.core/multiplex, csp-clj.core/tap! for convenience API"
   [source-ch]
   (let [taps (ConcurrentHashMap.)
-        executor (Executors/newVirtualThreadPerTaskExecutor)
-        m (->Multiplexer source-ch taps executor (java.util.concurrent.atomic.AtomicBoolean. false))]
+        m (->Multiplexer source-ch taps executors/io-executor (java.util.concurrent.atomic.AtomicBoolean. false))]
     ;; Start the dispatch loop on a virtual thread
     (Thread/startVirtualThread
      (fn []

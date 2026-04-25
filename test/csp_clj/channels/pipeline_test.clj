@@ -119,7 +119,7 @@
             to (csp/channel 10)
             errors (atom [])
             ex-handler (fn [e]
-                         (swap! errors conj (.getMessage e)))
+                         (swap! errors conj (.getMessage ^Throwable e)))
             xf (map (fn [x]
                       (if (= x 2)
                         (throw (RuntimeException. "fail on 2"))
@@ -195,7 +195,7 @@
           (channel-protocol/put! real-from :c)
 
           (csp/pipeline 2 to (map identity) throwing-from
-                        {:ex-handler (fn [e] (swap! errors conj (.getMessage e)))})
+                        {:ex-handler (fn [e] (swap! errors conj (.getMessage ^Throwable e)))})
 
           ;; Should get the first two values before ingress dies
           (is (= :a (csp/take! to 500)) "===> takes :a")
@@ -234,7 +234,7 @@
 
           (csp/pipeline 2 to (map identity) throwing-from
                         {:close? false
-                         :ex-handler (fn [e] (swap! errors conj (.getMessage e)))})
+                         :ex-handler (fn [e] (swap! errors conj (.getMessage ^Throwable e)))})
 
           (is (= :a (csp/take! to 500)) "===> takes :a")
 
