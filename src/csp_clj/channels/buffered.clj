@@ -75,8 +75,8 @@
   channel-protocol/Channel
 
   (put! [this value]
-    (when (nil? value)
-      (throw (IllegalArgumentException. "Cannot put nil on channel")))
+    (when (or (nil? value) (= value :interrupted))
+      (throw (IllegalArgumentException. "Cannot put nil or :interrupted on channel")))
 
     ;; Fast-path closed check outside lock
     (if (.get closed)
@@ -118,12 +118,14 @@
               (if (or (= res :timeout) (= res :interrupted))
                 (do
                   (selectable-protocol/cancel-wait! this waiter)
-                  res)
-                res)))))))
+                  (if (= res :interrupted)
+                    false res))
+                (if (= res :interrupted)
+                  false res))))))))
 
   (put! [this value timeout-ms]
-    (when (nil? value)
-      (throw (IllegalArgumentException. "Cannot put nil on channel")))
+    (when (or (nil? value) (= value :interrupted))
+      (throw (IllegalArgumentException. "Cannot put nil or :interrupted on channel")))
 
     (if (.get closed)
       false
@@ -158,8 +160,10 @@
               (if (or (= res :timeout) (= res :interrupted))
                 (do
                   (selectable-protocol/cancel-wait! this waiter)
-                  res)
-                res)))))))
+                  (if (= res :interrupted)
+                    false res))
+                (if (= res :interrupted)
+                  false res))))))))
 
   (take! [this]
     (let [commit (waiters/new-commit)
@@ -199,6 +203,7 @@
           (selectable-protocol/cancel-wait! this waiter))
         (cond
           (identical? final-state waiters/EOF) nil
+          (= final-state :interrupted) nil
           :else final-state))))
 
   (take! [this timeout-ms]
@@ -233,6 +238,7 @@
           (selectable-protocol/cancel-wait! this waiter))
         (cond
           (identical? final-state waiters/EOF) nil
+          (= final-state :interrupted) nil
           :else final-state))))
 
   (close! [_]
@@ -286,8 +292,8 @@
             (.unlock lock))))
       ;; Try to put without blocking
       (do
-        (when (nil? value)
-          (throw (IllegalArgumentException. "Cannot put nil on channel")))
+        (when (or (nil? value) (= value :interrupted))
+          (throw (IllegalArgumentException. "Cannot put nil or :interrupted on channel")))
         (.lock lock)
         (try
           (if (.get closed)

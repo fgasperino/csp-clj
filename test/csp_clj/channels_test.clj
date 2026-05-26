@@ -70,7 +70,64 @@
 
           (is (thrown? IllegalArgumentException
                        (channels/put! ch nil))
-              "===> throws IllegalArgumentException on nil"))))
+              "===> throws IllegalArgumentException on nil")))
+
+      (testing "==> channels reject :interrupted"
+
+        (let [unbuffered-ch (channels/create)
+              buffered-ch (channels/create 5)]
+
+          (is (thrown? IllegalArgumentException
+                       (channels/put! unbuffered-ch :interrupted))
+              "===> unbuffered put! rejects :interrupted")
+          (is (thrown? IllegalArgumentException
+                       (channels/put! buffered-ch :interrupted))
+              "===> buffered put! rejects :interrupted")
+          (is (thrown? IllegalArgumentException
+                       (channels/select! [[buffered-ch :put :interrupted]]))
+              "===> select! put rejects :interrupted"))))
+
+    (testing "=> interrupted blocking operations"
+
+      (testing "==> take! returns nil and preserves interrupt flag"
+
+        (let [ch (channels/create)
+              result (atom :pending)
+              interrupted? (atom false)
+              latch (CountDownLatch. 1)
+              t (Thread/startVirtualThread
+                 (fn []
+                   (reset! result (channels/take! ch))
+                   (reset! interrupted? (.isInterrupted (Thread/currentThread)))
+                   (.countDown latch)))]
+
+          (Thread/sleep 50)
+          (.interrupt t)
+          (is (.await latch 1 TimeUnit/SECONDS) "===> interrupted take! returns")
+          (is (nil? @result) "===> take! normalizes interruption to nil")
+          (is (true? @interrupted?) "===> interrupt flag is preserved")
+          (is (= 0 (.size ^java.util.ArrayDeque (:takes ch)))
+              "===> interrupted take! removes waiter")))
+
+      (testing "==> put! returns false and preserves interrupt flag"
+
+        (let [ch (channels/create)
+              result (atom :pending)
+              interrupted? (atom false)
+              latch (CountDownLatch. 1)
+              t (Thread/startVirtualThread
+                 (fn []
+                   (reset! result (channels/put! ch :val))
+                   (reset! interrupted? (.isInterrupted (Thread/currentThread)))
+                   (.countDown latch)))]
+
+          (Thread/sleep 50)
+          (.interrupt t)
+          (is (.await latch 1 TimeUnit/SECONDS) "===> interrupted put! returns")
+          (is (false? @result) "===> put! normalizes interruption to false")
+          (is (true? @interrupted?) "===> interrupt flag is preserved")
+          (is (= 0 (.size ^java.util.ArrayDeque (:puts ch)))
+              "===> interrupted put! removes waiter"))))
 
     (testing "=> multiple close operations"
 

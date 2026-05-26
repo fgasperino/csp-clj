@@ -135,6 +135,7 @@ Buffered channels are useful when:
 
 Both `put!` and `take!` support optional timeouts. When a timeout is specified, the operation returns `:timeout` instead of blocking indefinitely.
 
+If a direct `put!` or `take!` is interrupted, the thread interrupt flag is preserved and the operation follows the normal public contract: `put!` returns `false`, and `take!` returns `nil`.
 ```clojure
 (def ch (csp/channel))
 
