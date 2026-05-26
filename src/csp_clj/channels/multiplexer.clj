@@ -184,7 +184,7 @@
                                       (when-not success
                                         (.remove taps tap-ch)))
                                     ;; ERROR SCENARIO 2: Tap threw exception
-                                    (catch Exception _
+                                    (catch Throwable _
                                       (.remove taps tap-ch))
                                     ;; ALWAYS deregister, even on failure
                                     (finally
