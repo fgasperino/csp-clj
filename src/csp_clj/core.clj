@@ -69,12 +69,12 @@
    
    Parameters:
      - ch: the channel
-     - value: the value to put (cannot be nil)
+     - value: the value to put (cannot be nil or :interrupted)
      - timeout-ms: optional timeout in milliseconds
    
    Returns:
      - true: value was successfully transferred
-     - false: channel is closed
+     - false: channel is closed or thread interrupted
      - :timeout: timeout elapsed (if timeout-ms provided)
    
    Example:
