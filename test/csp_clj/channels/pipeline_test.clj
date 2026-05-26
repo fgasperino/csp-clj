@@ -68,6 +68,27 @@
         (is (= 2 (csp/take! to 100)) "===> takes 2 next")
         (is (= 3 (csp/take! to 100)) "===> takes 3 last")))
 
+    (testing "=> parallelism bound is exactly n"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)
+            active (atom 0)
+            max-active (atom 0)
+            xf (map (fn [x]
+                      (let [current (swap! active inc)]
+                        (swap! max-active max current)
+                        (Thread/sleep 100)
+                        (swap! active dec)
+                        x)))]
+
+        (csp/into-chan! from (range 4))
+        (csp/pipeline 1 to xf from {:executor :io})
+
+        (dotimes [i 4]
+          (is (= i (csp/take! to 1000)) "===> takes ordered result"))
+        (is (nil? (csp/take! to 1000)) "===> takes nil")
+        (is (= 1 @max-active) "===> never runs more than n jobs")))
+
     (testing "=> close? = false"
 
       (let [from (csp/channel 10)

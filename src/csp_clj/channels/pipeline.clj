@@ -21,7 +21,8 @@
    Called by: csp-clj.channels/pipeline, csp-clj.core/pipeline"
   (:require
    [csp-clj.protocols.channel :as channel-protocol]
-   [csp-clj.channels.buffered :as buffered])
+   [csp-clj.channels.buffered :as buffered]
+   [csp-clj.channels.unbuffered :as unbuffered])
   (:import
    [java.util.concurrent Executors ExecutorService CompletableFuture]))
 
@@ -43,7 +44,9 @@
 ;;   Submits work to executor          Puts results to 'to'
 ;;   Limits via jobs channel           Maintains ordering
 ;;
-;; The threads communicate via a buffered 'jobs' channel (size = parallelism).
+;; The jobs channel has capacity n-1 so total in-flight work is exactly n.
+;; The threads communicate via a 'jobs' channel that reserves one active slot
+;; for the future currently held by egress.
 ;; This channel provides both work distribution and backpressure.
 ;;
 ;; ORDERING GUARANTEE VIA COMPLETABLEFUTURE
@@ -63,9 +66,10 @@
 ;;
 ;; BACKPRESSURE MECHANISM
 ;;
-;; Backpressure is provided by the jobs channel (buffered, size = n):
+;; The jobs channel bounds total in-flight work to n, not n + 1.
+;; Backpressure is provided by the jobs channel:
 ;;
-;;   ;; When jobs channel is full (n futures pending)
+;;   ;; When jobs channel is full (n futures in flight including egress)
 ;;   (put! jobs new-future)  ; BLOCKS ingress thread
 ;;
 ;; This naturally limits in-flight work to 'n' parallel operations.
@@ -167,6 +171,13 @@
     (-> t .getUncaughtExceptionHandler (.uncaughtException t ex)))
   nil)
 
+(defn- jobs-channel [n]
+  (when-not (pos-int? n)
+    (throw (IllegalArgumentException. "pipeline parallelism n must be a positive integer")))
+  (if (= n 1)
+    (unbuffered/create)
+    (buffered/create (dec n))))
+
 (defn pipeline
   "Takes elements from the from channel and supplies them to the to
    channel, subject to the transducer xf, with parallelism n.
@@ -239,7 +250,8 @@
                        executor :cpu
                        ex-handler default-ex-handler}}]
    (let [exec (get-executor executor)
-         jobs (buffered/create n)]
+          ;; Use n-1 queued futures plus one egress-held future.
+         jobs (jobs-channel n)]
 
       ;; EGRESS THREAD: Takes futures in order, puts results in order
      (Thread/startVirtualThread
@@ -297,9 +309,9 @@
                  ;; Input channel closed - stop accepting new work
                 nil
                 (let [f (CompletableFuture.)]
-                   ;; BLOCKING POINT: Put future onto jobs queue
-                   ;; This limits parallelism to n because jobs is buffered with size n
-                   ;; When full, this blocks, applying backpressure to the source
+                  ;; Put future onto jobs queue after reserving an in-flight slot.
+                  ;; This limits parallelism to n including the future held by egress.
+                  ;; When full, this blocks, applying backpressure to the source
                   (if (channel-protocol/put! jobs f)
                     (do
                        ;; Submit transducer work to executor
