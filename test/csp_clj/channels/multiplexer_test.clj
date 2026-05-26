@@ -170,7 +170,40 @@
             (is (= :third (channels/take! good-tap 200))
                 "====> good-tap receives third message, mult still functioning")
 
-            (channels/close! source)))))))
+            (channels/close! source))))
+
+      (testing "===> tap that throws Error is silently removed"
+
+        (let [source (channels/create)
+              m (channels/multiplex source)
+              good-tap (channels/create 10)
+              call-count (atom 0)
+              throwing-tap (reify channel-protocol/Channel
+                             (put! [_ _]
+                               (swap! call-count inc)
+                               (throw (AssertionError. "tap error")))
+                             (put! [_ _ _]
+                               (swap! call-count inc)
+                               (throw (AssertionError. "tap error")))
+                             (take! [_] nil)
+                             (take! [_ _] nil)
+                             (close! [_] nil)
+                             (closed? [_] false))]
+
+          (channels/tap! m good-tap)
+          (channels/tap! m throwing-tap)
+
+          (channels/put! source :first)
+          (is (= :first (channels/take! good-tap 200))
+              "====> good-tap receives first message despite Error tap")
+
+          (channels/put! source :second)
+          (is (= :second (channels/take! good-tap 200))
+              "====> good-tap receives second message after Error tap removed")
+          (is (= 1 @call-count)
+              "====> Error tap was removed after first failure")
+
+          (channels/close! source))))))
 
 (deftest ^:functional multiplex-toctou-tests
 
