@@ -158,7 +158,7 @@
                 (when close?
                   (protocol-channel/close! tap-ch)))
               (.clear taps)
-              (.close executor))
+              (.shutdownNow executor))
             ;; Value received - dispatch to all taps
             ;; TOCTOU-SAFE SNAPSHOT: Create immutable view of current taps
             ;; ConcurrentHashMap iterator is weakly consistent - safe to snapshot
@@ -183,8 +183,8 @@
                                       ;; ERROR SCENARIO 1: Tap closed during put
                                       (when-not success
                                         (.remove taps tap-ch)))
-                                    ;; ERROR SCENARIO 2: Tap threw exception
-                                    (catch Exception _
+                                    ;; ERROR SCENARIO 2: Tap threw exception/error
+                                    (catch Throwable _
                                       (.remove taps tap-ch))
                                     ;; ALWAYS deregister, even on failure
                                     (finally
@@ -199,14 +199,16 @@
                   ;; If any tap blocks (full buffer, unbuffered wait), mult blocks
                   (.arriveAndAwaitAdvance phaser)
                   (recur)))))))
-      ;; Exception handler: Clean up and mark closed
-      (catch Exception _
+      ;; Exception/Error handler: Clean up and mark closed
+      ;; Using shutdownNow instead of close to avoid deadlock if
+      ;; previously-submitted tap tasks are still blocked on put!
+      (catch Throwable _
         (.set closed true)
         (doseq [[tap-ch close?] taps]
           (when close?
             (protocol-channel/close! tap-ch)))
         (.clear taps)
-        (.close executor)))))
+        (.shutdownNow executor)))))
 
 (defn create
   "Creates and returns a mult(iplexer) for the given source channel.
