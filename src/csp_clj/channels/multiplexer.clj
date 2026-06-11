@@ -111,6 +111,9 @@
         ;; Re-check closed flag to prevent race condition where
         ;; dispatch-loop closed and cleared taps right before we put.
         ;; This ensures tap is either fully registered OR closed, never orphaned.
+        ;; Note: this can race with dispatch-loop cleanup (both calling close!
+        ;; on the same channel). The Channel protocol requires close! to be
+        ;; idempotent to handle this safely.
         (when (.get closed)
           (.remove taps ch)
           (when close?
