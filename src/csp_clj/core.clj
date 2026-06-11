@@ -208,6 +208,10 @@
    
    Parameters:
      - source-ch: the source channel to multiplex from
+     - opts: optional map with :ex-handler key for error handling
+   
+   Options:
+     - :ex-handler - Function called on dispatch-loop errors (default: stderr)
    
    Returns:
      A multiplexer implementing csp-clj.protocols.multiplexer/Multiplexer
@@ -215,6 +219,7 @@
    Example:
      (def source (channel))
      (def m (multiplex source))
+     (def m2 (multiplex source {:ex-handler #(log/error \"mult failed\" %)}))
      (def tap-ch (channel 10))
      (tap! m tap-ch)
      => #csp_clj.channels.multiplexer.Multiplexer{...}
