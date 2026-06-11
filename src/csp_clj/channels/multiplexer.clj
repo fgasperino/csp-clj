@@ -64,7 +64,8 @@
 ;; 1. ConcurrentHashMap provides weakly-consistent iterators
 ;; 2. Iterator sees state at some point at or since creation
 ;; 3. Taps added after snapshot won't receive THIS value (correct)
-;; 4. Taps removed during dispatch remain in snapshot but fail gracefully
+;; 4. Taps removed during dispatch remain in snapshot but will receive
+;;    the current value before removal takes effect (TOCTOU tradeoff)
 ;;
 ;; Example scenario:
 ;;   T1: Snapshot = [tap1, tap2]
@@ -118,6 +119,8 @@
     nil)
 
   ;; Remove a tap channel. Safe to call from any thread.
+  ;; Due to snapshot-based dispatch, the channel may receive one
+  ;; more value before removal takes effect (TOCTOU tradeoff).
   (untap! [_ ch]
     (.remove taps ch)
     nil)
