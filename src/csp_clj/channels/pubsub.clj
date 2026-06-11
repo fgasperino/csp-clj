@@ -114,7 +114,7 @@
 ;; closed - AtomicBoolean, true when source closed or error
 ;;
 ;; See also: csp-clj.channels.multiplexer, csp-clj.protocols.publisher
-(defrecord Publisher [source topic-fn ^ConcurrentHashMap topic-mults buf-fn ^java.util.concurrent.atomic.AtomicBoolean closed]
+(defrecord Publisher [source topic-fn ^ConcurrentHashMap topic-mults buf-fn ex-handler ^java.util.concurrent.atomic.AtomicBoolean closed]
   publisher-protocol/Publisher
 
   ;; Subscribe a channel to a topic with optional auto-close on publisher shutdown.
@@ -173,8 +173,8 @@
                           ;; Auto-cleanup: remove topic if no subscribers left
                           (if (.isEmpty ^ConcurrentHashMap (:taps mult))
                             (do (channel-protocol/close! (:source mult))
-                                nil)  ; Return nil to remove from map
-                            mult)))))  ; Return mult to keep in map
+                                nil) ; Return nil to remove from map
+                            mult))))) ; Return mult to keep in map
           ;; Close the channel if requested (user wanted auto-close)
           (when close?
             (channel-protocol/close! ch)))))
@@ -201,8 +201,8 @@
                     (if (.isEmpty ^ConcurrentHashMap (:taps mult))
                       ;; Last subscriber removed: cleanup topic
                       (do (channel-protocol/close! (:source mult))
-                          nil)  ; Return nil to remove topic from map
-                      mult)))))  ; Return mult to keep topic in map
+                          nil) ; Return nil to remove topic from map
+                      mult))))) ; Return mult to keep topic in map
     nil)
 
   ;; Unsubscribe all channels from all topics (two arities).
@@ -239,6 +239,20 @@
                     nil))))
     nil))
 
+(defn- default-ex-handler
+  "Default exception handler for publisher dispatch-loop errors.
+   
+   Delegates to thread's uncaught exception handler.
+   
+   Parameters:
+     - ex: the exception/error that occurred
+   
+   Called by: create (when no custom :ex-handler provided)"
+  [ex]
+  (let [t (Thread/currentThread)]
+    (-> t .getUncaughtExceptionHandler (.uncaughtException t ex)))
+  nil)
+
 (defn- dispatch-loop
   "Background loop that routes messages to topic multiplexers.
 
@@ -255,6 +269,7 @@
   (let [source (:source pub)
         topic-fn (:topic-fn pub)
         ^ConcurrentHashMap topic-mults (:topic-mults pub)
+        ex-handler (:ex-handler pub)
         ^java.util.concurrent.atomic.AtomicBoolean closed (:closed pub)]
     (try
       (loop []
@@ -282,6 +297,7 @@
       ;; 2. Publisher state is marked as closed
       ;; 3. Consistent with pipeline exception handling
       (catch Throwable t
+        (ex-handler t)
         (.set closed true)
         ;; Cleanup all topics on any error
         (doseq [mult (.values topic-mults)]
@@ -312,13 +328,13 @@
      (unsub! p :orders order-ch)  ; still has admin-ch
      (unsub! p :orders admin-ch)  ; last subscriber, :orders removed
 
-   BUFFER FUNCTION
+   OPTIONS MAP
 
-   buf-fn is an optional function (topic -> capacity) for per-topic buffering:
-
-     (create ch topic-fn)                 ; no buf-fn, all unbuffered
-     (create ch topic-fn #(if % 10 1))    ; custom buffer per topic
-     (create ch topic-fn (constantly 4))  ; all topics buffered with 4
+   Options:
+   - :buf-fn - Function (topic -> capacity) for per-topic buffering.
+               nil or omitted means unbuffered channels (default).
+   - :ex-handler - Function called on dispatch-loop errors.
+                   Default: delegate to thread's uncaught exception handler.
 
    Edge cases:
    - buf-fn returns nil or 0 → unbuffered channel created
@@ -343,14 +359,15 @@
    Parameters:
      - source-ch: the source channel to read from
      - topic-fn: function to extract topic from values
-     - buf-fn: optional function (topic -> capacity) for buffer sizes
+     - opts: optional map with :buf-fn, :ex-handler keys
 
    Returns:
      A Publisher implementing csp-clj.protocols.publisher/Publisher
 
    Example:
-     (def p (create ch :type))              ; topic is :type field
-     (def p (create ch :type #(if % 10 1))) ; custom buffer per topic
+     (def p (create ch :type))              ; topic is :type field, unbuffered
+     (def p (create ch :type {:buf-fn #(if % 10 1)})) ; custom buffer per topic
+     (def p (create ch :type {:ex-handler #(log/error \"pub died!\" %)}))
      (sub! p :orders order-ch)
 
    See also:
@@ -359,9 +376,9 @@
      - csp-clj.channels.multiplexer for broadcast alternative"
   ([source-ch topic-fn]
    (create source-ch topic-fn nil))
-  ([source-ch topic-fn buf-fn]
+  ([source-ch topic-fn {:keys [buf-fn ex-handler] :or {ex-handler default-ex-handler}}]
    (let [topic-mults (ConcurrentHashMap.)
-         p (->Publisher source-ch topic-fn topic-mults buf-fn (java.util.concurrent.atomic.AtomicBoolean. false))]
+         p (->Publisher source-ch topic-fn topic-mults buf-fn ex-handler (java.util.concurrent.atomic.AtomicBoolean. false))]
       ;; Start dispatch loop on virtual thread
      (Thread/startVirtualThread
       (fn []

@@ -293,14 +293,19 @@
    Parameters:
      - source-ch: channel to read from
      - topic-fn: function to extract topic from value
-     - buf-fn: optional function (topic -> capacity) for buffer sizes
+     - opts: optional map with :buf-fn and :ex-handler keys
+   
+   Options:
+     - :buf-fn - function (topic -> capacity), nil for unbuffered (default)
+     - :ex-handler - function called on dispatch-loop errors (default: stderr)
    
    Returns:
      A publisher implementing csp-clj.protocols.publisher/Publisher
    
    Example:
      (def p (pub! ch :type))              ; topic is :type field
-     (def p (pub! ch :type #(if % 10 1))) ; custom buffer per topic
+     (def p (pub! ch :type {:buf-fn #(if % 10 1)})) ; custom buffer per topic
+     (def p (pub! ch :type {:ex-handler #(log/error \"pub failed\" %)}))
    
    See also: csp-clj.channels/pub!, sub!, unsub!"
   channels/pub!)
