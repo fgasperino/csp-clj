@@ -96,11 +96,15 @@
           (if-not (nil? state)
             state
             (let [res (waiters/park-and-wait commit nil)]
-              (if (or (= res :timeout) (= res :interrupted))
+              (if (= res :timeout)
                 (do
                   (selectable-protocol/cancel-wait! this waiter)
                   res)
-                res)))))))
+                (if (= res :interrupted)
+                  (do
+                    (selectable-protocol/cancel-wait! this waiter)
+                    false)
+                  res))))))))
 
   (put! [this value timeout-ms]
     (when (nil? value)
@@ -131,11 +135,15 @@
           (if-not (nil? state)
             state
             (let [res (waiters/park-and-wait commit timeout-ms)]
-              (if (or (= res :timeout) (= res :interrupted))
+              (if (= res :timeout)
                 (do
                   (selectable-protocol/cancel-wait! this waiter)
                   res)
-                res)))))))
+                (if (= res :interrupted)
+                  (do
+                    (selectable-protocol/cancel-wait! this waiter)
+                    false)
+                  res))))))))
 
   (take! [this]
     (let [commit (waiters/new-commit)
@@ -169,6 +177,7 @@
         (when (or (= final-state :timeout) (= final-state :interrupted))
           (selectable-protocol/cancel-wait! this waiter))
         (cond
+          (= final-state :interrupted) nil
           (identical? final-state waiters/EOF) nil
           :else final-state))))
 
@@ -198,6 +207,7 @@
         (when (or (= final-state :timeout) (= final-state :interrupted))
           (selectable-protocol/cancel-wait! this waiter))
         (cond
+          (= final-state :interrupted) nil
           (identical? final-state waiters/EOF) nil
           :else final-state))))
 
