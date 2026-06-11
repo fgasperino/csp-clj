@@ -64,7 +64,8 @@
 ;; 1. ConcurrentHashMap provides weakly-consistent iterators
 ;; 2. Iterator sees state at some point at or since creation
 ;; 3. Taps added after snapshot won't receive THIS value (correct)
-;; 4. Taps removed during dispatch remain in snapshot but fail gracefully
+;; 4. Taps removed during dispatch remain in snapshot but will receive
+;;    the current value before removal takes effect (TOCTOU tradeoff)
 ;;
 ;; Example scenario:
 ;;   T1: Snapshot = [tap1, tap2]
@@ -92,7 +93,7 @@
 ;; closed - AtomicBoolean, true when source closed or error occurred
 ;;
 ;; See also: csp-clj.protocols.multiplexer, csp-clj.channels.pubsub (topic-based)
-(defrecord Multiplexer [source ^ConcurrentHashMap taps ^java.util.concurrent.ExecutorService executor ^java.util.concurrent.atomic.AtomicBoolean closed]
+(defrecord Multiplexer [source ^ConcurrentHashMap taps ^java.util.concurrent.ExecutorService executor ex-handler ^java.util.concurrent.atomic.AtomicBoolean closed]
   protocol-multiplexer/Multiplexer
 
   ;; TOCTOU RACE HANDLING:
@@ -118,6 +119,8 @@
     nil)
 
   ;; Remove a tap channel. Safe to call from any thread.
+  ;; Due to snapshot-based dispatch, the channel may receive one
+  ;; more value before removal takes effect (TOCTOU tradeoff).
   (untap! [_ ch]
     (.remove taps ch)
     nil)
@@ -126,6 +129,20 @@
   (untap-all! [_]
     (.clear taps)
     nil))
+
+(defn- default-ex-handler
+  "Default exception handler for multiplexer dispatch-loop errors.
+   
+   Delegates to thread's uncaught exception handler.
+   
+   Parameters:
+     - ex: the exception/error that occurred
+   
+   Called by: create (when no custom :ex-handler provided)"
+  [ex]
+  (let [t (Thread/currentThread)]
+    (-> t .getUncaughtExceptionHandler (.uncaughtException t ex)))
+  nil)
 
 (defn- dispatch-loop
   "Background loop that routes messages from source to all taps.
@@ -144,6 +161,7 @@
   (let [source (:source mult)
         ^ConcurrentHashMap taps (:taps mult)
         ^java.util.concurrent.ExecutorService executor (:executor mult)
+        ex-handler (:ex-handler mult)
         ^java.util.concurrent.atomic.AtomicBoolean closed (:closed mult)]
     (try
       (loop []
@@ -202,7 +220,8 @@
       ;; Exception/Error handler: Clean up and mark closed
       ;; Using shutdownNow instead of close to avoid deadlock if
       ;; previously-submitted tap tasks are still blocked on put!
-      (catch Throwable _
+      (catch Throwable t
+        (ex-handler t)
         (.set closed true)
         (doseq [[tap-ch close?] taps]
           (when close?
@@ -232,6 +251,15 @@
    If the source channel is closed, the mult thread exits and will
    close all taps that were registered with close? = true.
 
+   ERROR HANDLING
+
+   If the dispatch-loop encounters an error (Exception or Error), the
+   :ex-handler is called before resource cleanup. By default, errors
+   delegate to the thread's uncaught exception handler (stderr).
+
+   Options:
+   - :ex-handler - Function to handle dispatch-loop errors
+
    THREAD SAFETY
 
    All operations (tap!, untap!, untap-all!) are thread-safe and may
@@ -240,12 +268,14 @@
 
    Parameters:
      - source-ch: the source channel to read from
+     - opts: optional map with :ex-handler key
 
    Returns:
      A Multiplexer implementing csp-clj.protocols.multiplexer/Multiplexer
 
    Example:
      (def m (create ch))
+     (def m (create ch {:ex-handler #(log/error \"mult died!\" %)}))
      (tap! m tap-ch1 true)   ; tap-ch1 closes when mult closes
      (tap! m tap-ch2 false)  ; tap-ch2 stays open when mult closes
 
@@ -253,12 +283,14 @@
      - csp-clj.protocols.multiplexer for protocol definition
      - csp-clj.channels.pubsub for topic-based routing (alternative)
      - csp-clj.core/multiplex, csp-clj.core/tap! for convenience API"
-  [source-ch]
-  (let [taps (ConcurrentHashMap.)
-        executor (Executors/newVirtualThreadPerTaskExecutor)
-        m (->Multiplexer source-ch taps executor (java.util.concurrent.atomic.AtomicBoolean. false))]
+  ([source-ch]
+   (create source-ch nil))
+  ([source-ch {:keys [ex-handler] :or {ex-handler default-ex-handler}}]
+   (let [taps (ConcurrentHashMap.)
+         executor (Executors/newVirtualThreadPerTaskExecutor)
+         m (->Multiplexer source-ch taps executor ex-handler (java.util.concurrent.atomic.AtomicBoolean. false))]
     ;; Start the dispatch loop on a virtual thread
-    (Thread/startVirtualThread
-     (fn []
-       (dispatch-loop m)))
-    m))
+     (Thread/startVirtualThread
+      (fn []
+        (dispatch-loop m)))
+     m)))

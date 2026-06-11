@@ -149,9 +149,14 @@
    until all taps have accepted the current value (backpressure).
 
    If the source channel is closed, the mult thread exits and will
-   close all taps that were registered with close? = true."
-  [source-ch]
-  (multiplexer/create source-ch))
+   close all taps that were registered with close? = true.
+
+   Options:
+   - :ex-handler - Function to handle dispatch-loop errors (default: stderr)"
+  ([source-ch]
+   (multiplexer/create source-ch))
+  ([source-ch opts]
+   (multiplexer/create source-ch opts)))
 
 (defn tap!
   "Registers a tap channel on a mult.

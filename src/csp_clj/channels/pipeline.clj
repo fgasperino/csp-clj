@@ -305,22 +305,20 @@
                        ;; Submit transducer work to executor
                        ;; The transducer is applied to [v] (single-element vector)
                        ;; This matters for stateful transducers (partition-all, dedupe, etc.)
-                      (.execute exec
-                                (fn []
-                                  (try
-                                     ;; Apply transducer xf to single-element vector [v]
-                                    (let [results (into [] xf [v])]
-                                       ;; Complete future with results (0-N values)
-                                      (.complete f results))
-                                     ;; Catch Throwable (not just Exception) for consistency
-                                     ;; Complete future with empty vector so egress doesn't hang
-                                    (catch Throwable e
-                                      (try
-                                        (ex-handler e)
-                                        (finally
-                                           ;; MUST complete future even on error
-                                           ;; Otherwise egress thread would block forever on .get
-                                          (.complete f [])))))))
+                      (try
+                        (.execute exec
+                                  (fn []
+                                    (try
+                                      (let [results (into [] xf [v])]
+                                        (.complete f results))
+                                      (catch Throwable e
+                                        (try
+                                          (ex-handler e)
+                                          (finally
+                                            (.complete f [])))))))
+                        (catch Throwable e
+                          (.complete f [])
+                          (throw e)))
                       (recur))
                      ;; Jobs channel was closed by egress (output channel closed)
                      ;; Exit immediately, dropping any pending input
