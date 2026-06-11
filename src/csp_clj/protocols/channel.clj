@@ -15,7 +15,13 @@
 (set! *warn-on-reflection* true)
 
 (defprotocol Channel
-  "Protocol for channel operations."
+  "Protocol for channel operations.
+
+   Implementations of close! must be idempotent — multiple calls should
+   be safe and have no additional effect. This is required because
+   concurrent shutdown paths (e.g., multiplexer dispatch-loop cleanup
+   and tap! undo) may call close! on the same channel from different
+   threads."
 
   (put! [ch value] [ch value timeout-ms])
   (take! [ch] [ch timeout-ms])
