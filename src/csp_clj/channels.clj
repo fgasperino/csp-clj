@@ -183,14 +183,16 @@
    subscribed to the value's topic.
 
    The topic is determined by calling topic-fn on the value.
-   
-   buf-fn is an optional function that takes a topic and returns a
-   buffer capacity. If not provided, unbuffered channels are used
-   internally."
+
+   Options (opts map):
+   - :buf-fn - Function (topic -> capacity) for per-topic buffering.
+               nil or omitted means unbuffered channels (default).
+   - :ex-handler - Function called on dispatch-loop errors.
+                   Default: delegate to thread's uncaught exception handler."
   ([source-ch topic-fn]
    (pubsub/create source-ch topic-fn nil))
-  ([source-ch topic-fn buf-fn]
-   (pubsub/create source-ch topic-fn buf-fn)))
+  ([source-ch topic-fn opts]
+   (pubsub/create source-ch topic-fn opts)))
 
 (defn sub!
   "Subscribes a channel to a topic of a pub(lisher).

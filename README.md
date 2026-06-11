@@ -1104,7 +1104,7 @@ Pub/Sub (publish/subscribe) routes values from a source channel to different sub
 **API Overview:**
 
 - `(pub! source-ch topic-fn)` - Create publisher with topic function
-- `(pub! source-ch topic-fn buf-fn)` - With per-topic buffer sizing
+- `(pub! source-ch topic-fn opts)` - With options: `:buf-fn` (per-topic buffer), `:ex-handler` (error callback)
 - `(sub! pub topic ch)` - Subscribe channel to topic
 - `(sub! pub topic ch close?)` - Subscribe with auto-close option
 - `(unsub! pub topic ch)` - Unsubscribe channel from topic
@@ -1249,12 +1249,12 @@ This example shows how to use `buf-fn` to give different topics different buffer
 ;; Publisher with per-topic buffer sizing
 ;; buf-fn receives the topic and returns buffer capacity
 (def router (csp/pub! event-source :priority
-                       (fn [topic]
-                         (case topic
-                           :high 100      ; Large buffer for critical events
-                           :normal 10     ; Standard buffer
-                           :low 1         ; Minimal buffer (drop if backed up)
-                           5))))         ; Default
+                       {:buf-fn (fn [topic]
+                                  (case topic
+                                    :high 100      ; Large buffer for critical events
+                                    :normal 10     ; Standard buffer
+                                    :low 1         ; Minimal buffer (drop if backed up)
+                                    5))}))         ; Default
 
 ;; Subscribe to different priority levels
 (def high-ch (csp/channel))
