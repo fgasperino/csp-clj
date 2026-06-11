@@ -238,31 +238,21 @@
             ;; Operation completed, return the result
             current-state
             ;; Still pending - check timeout
-            (let [remaining (- deadline (System/nanoTime))]
-              (if (<= remaining 0)
-                ;; TIMEOUT ELAPSED: Try to claim the commit atomically
-                ;; Must lock to prevent race with completing thread
+            (if (Thread/interrupted)
+              (do
+                (.interrupt (Thread/currentThread))
                 (locking commit
                   (if (nil? (get-state commit))
-                    ;; Successfully claimed: mark as timeout
-                    (do (set-state! commit :timeout) :timeout)
-                    ;; Another thread completed us during the race window
-                    (get-state commit)))
-                ;; Check for thread interrupt
-                (if (Thread/interrupted)
-                  ;; INTERRUPT RECEIVED: Re-assert flag and claim commit
-                  ;; Re-asserting is critical: some code depends on interrupt state
-                  (do
-                    (.interrupt (Thread/currentThread)) ;; ALWAYS re-assert the flag
-                    (locking commit
-                      (if (nil? (get-state commit))
-                        (do (set-state! commit :interrupted) :interrupted)
-                        (get-state commit))))
-                  ;; No interrupt and time remains: Park and wait
-                  ;; LockSupport/parkNanos releases carrier thread (virtual thread aware)
+                    (do (set-state! commit :interrupted) :interrupted)
+                    (get-state commit))))
+              (let [remaining (- deadline (System/nanoTime))]
+                (if (<= remaining 0)
+                  (locking commit
+                    (if (nil? (get-state commit))
+                      (do (set-state! commit :timeout) :timeout)
+                      (get-state commit)))
                   (do
                     (LockSupport/parkNanos remaining)
-                    ;; Woke up - loop to check state/timeout/interrupt
                     (recur)))))))))
 
     ;; INDEFINITE BLOCKING PATH: No timeout
