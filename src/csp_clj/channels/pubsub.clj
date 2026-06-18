@@ -225,10 +225,12 @@
                     (when mult
                       ;; Remove all subscribers from this topic
                       (multiplexer-protocol/untap-all! mult)
-                      ;; Close topic's internal channel
-                      (channel-protocol/close! (:source mult))
-                      ;; Return nil to remove topic from map
-                      nil)))))
+                      ;; If a concurrent sub! added a tap during cleanup,
+                      ;; keep the topic alive.  Otherwise remove it.
+                      (if (.isEmpty ^ConcurrentHashMap (:taps mult))
+                        (do (channel-protocol/close! (:source mult))
+                            nil)
+                        mult))))))
     nil)
 
   (unsub-all! [_ topic]
@@ -238,10 +240,12 @@
                   (when mult
                     ;; Remove all subscribers from this topic
                     (multiplexer-protocol/untap-all! mult)
-                    ;; Close topic's internal channel
-                    (channel-protocol/close! (:source mult))
-                    ;; Return nil to remove topic from map
-                    nil))))
+                    ;; If a concurrent sub! added a tap during cleanup,
+                    ;; keep the topic alive.  Otherwise remove it.
+                    (if (.isEmpty ^ConcurrentHashMap (:taps mult))
+                      (do (channel-protocol/close! (:source mult))
+                          nil)
+                      mult)))))
     nil))
 
 (defn- default-ex-handler
