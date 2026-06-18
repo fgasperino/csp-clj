@@ -198,3 +198,37 @@
               "===> late tap yields EOF")
           (is (= 0 (.size ^java.util.concurrent.ConcurrentHashMap (:taps m)))
               "===> mult does not hold reference to late tap"))))))
+
+(deftest ^:unit multiplex-error-handling-tests
+
+  (testing "ex-handler that throws does not prevent cleanup"
+
+    (testing "=> executor rejection triggers ex-handler, cleanup still runs"
+      (let [source (channels/create)
+            handler-called (atom false)
+            m (channels/multiplex source
+                 {:ex-handler (fn [_]
+                                (reset! handler-called true)
+                                (throw (RuntimeException. "ex-handler boom")))})]
+
+        ;; Add a tap so the dispatch loop has work to do
+        (let [tap-ch (channels/create 10)]
+          (channels/tap! m tap-ch)
+
+          ;; Shut down the multiplexer's executor to cause RejectedExecutionException
+          (.shutdownNow ^java.util.concurrent.ExecutorService (:executor m))
+
+          ;; Put a value into source — dispatch loop takes it,
+          ;; tries to execute on shut-down executor → throws → outer catch
+          (channels/put! source :value)
+          (Thread/sleep 100))
+
+        (is @handler-called "===> ex-handler was called")
+
+        ;; After cleanup, tapping should immediately close the channel
+        (let [late-tap (channels/create)]
+          (channels/tap! m late-tap true)
+          (is (channels/closed? late-tap)
+              "===> late tap closed (cleanup ran despite ex-handler throwing)")
+          (is (= 0 (.size ^java.util.concurrent.ConcurrentHashMap (:taps m)))
+              "===> multiplexer cleaned up taps"))))))
