@@ -262,3 +262,59 @@
               "===> late sub yields EOF")
           (is (empty? (.keySet ^java.util.concurrent.ConcurrentHashMap (:topic-mults p)))
               "===> pub does not create new mult for late sub"))))))
+
+(deftest ^:functional pubsub-resilience-tests
+
+  (testing "publisher survives exceptions during subscription"
+
+    (testing "=> buf-fn that throws does not break publisher"
+      (let [source (channels/create)
+            p (channels/pub! source :type
+                              {:buf-fn (fn [topic]
+                                         (when (= topic :fail)
+                                           (throw (RuntimeException. "simulated buf-fn failure")))
+                                         5)})
+            ok-ch (channels/create 5)]
+
+        ;; Normal subscription works
+        (channels/sub! p :ok ok-ch)
+
+        ;; Subscription to failing topic should throw
+        (is (thrown? RuntimeException
+                     (channels/sub! p :fail (channels/create 5)))
+            "===> sub with failing buf-fn throws")
+
+        ;; Publisher should still be alive after the failed sub
+        (channels/put! source {:type :ok :val :after-failure})
+        (is (= {:type :ok :val :after-failure} (channels/take! ok-ch 200))
+            "===> publisher still routes messages after failed sub")
+
+        (channels/close! source)))
+
+    (testing "=> sub to multiple topics still works after one topic fails"
+      (let [source (channels/create)
+            p (channels/pub! source :type
+                              {:buf-fn (fn [topic]
+                                         (when (= topic :fail)
+                                           (throw (RuntimeException. "simulated buf-fn failure")))
+                                         5)})
+            a-ch (channels/create 5)
+            b-ch (channels/create 5)]
+
+        (channels/sub! p :a a-ch)
+        (channels/sub! p :b b-ch)
+
+        ;; This should throw and not affect existing topics
+        (is (thrown? RuntimeException
+                     (channels/sub! p :fail (channels/create 5)))
+            "===> sub with failing buf-fn throws")
+
+        ;; Existing topics still work
+        (channels/put! source {:type :a :val 1})
+        (channels/put! source {:type :b :val 2})
+        (is (= {:type :a :val 1} (channels/take! a-ch 200))
+            "===> topic :a still routes")
+        (is (= {:type :b :val 2} (channels/take! b-ch 200))
+            "===> topic :b still routes")
+
+        (channels/close! source)))))

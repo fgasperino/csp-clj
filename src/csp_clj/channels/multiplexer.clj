@@ -292,8 +292,14 @@
    (let [taps (ConcurrentHashMap.)
          executor (Executors/newVirtualThreadPerTaskExecutor)
          m (->Multiplexer source-ch taps executor ex-handler (java.util.concurrent.atomic.AtomicBoolean. false))]
-    ;; Start the dispatch loop on a virtual thread
-     (Thread/startVirtualThread
-      (fn []
-        (dispatch-loop m)))
-     m)))
+    ;; Start the dispatch loop on a virtual thread.
+    ;; If the thread fails to start, shut down the already-created
+    ;; executor to prevent resource leaks.
+    (try
+      (Thread/startVirtualThread
+       (fn []
+         (dispatch-loop m)))
+      m
+      (catch Throwable t
+        (.shutdownNow executor)
+        (throw t))))))
