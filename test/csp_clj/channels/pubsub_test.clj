@@ -263,6 +263,74 @@
           (is (empty? (.keySet ^java.util.concurrent.ConcurrentHashMap (:topic-mults p)))
               "===> pub does not create new mult for late sub"))))))
 
+(deftest ^:functional pubsub-unsuball-race-tests
+
+  (testing "unsub-all! does not silently revoke subscriptions added during cleanup"
+
+    (testing "=> concurrent sub! survives unsub-all! when it races in"
+      (dotimes [_ 50]
+        (let [source (channels/create)
+              p (channels/pub! source :type)
+              surviving-chs (java.util.concurrent.ConcurrentLinkedQueue.)
+              errors (java.util.concurrent.ConcurrentLinkedQueue.)
+              start-latch (java.util.concurrent.CountDownLatch. 1)
+              done-latch (java.util.concurrent.CountDownLatch. 2)]
+
+          ;; Initial subscriber to ensure the :a topic exists before the race
+          (let [warmup-ch (channels/create 5)]
+            (channels/sub! p :a warmup-ch)
+            (channels/put! source {:type :a :val :warmup})
+            (channels/take! warmup-ch 200)
+            (channels/unsub! p :a warmup-ch))
+
+          ;; Thread 1: repeatedly subscribe to :a
+          (future
+            (try
+              (.await start-latch)
+              (dotimes [_ 20]
+                (let [ch (channels/create 5)]
+                  (channels/sub! p :a ch)
+                  (.add surviving-chs ch)
+                  (Thread/sleep 1)))
+              (catch Exception e
+                (.add errors e))
+              (finally
+                (.countDown done-latch))))
+
+          ;; Thread 2: repeatedly unsub-all! the :a topic
+          (future
+            (try
+              (.await start-latch)
+              (dotimes [_ 20]
+                (channels/unsub-all! p :a)
+                (Thread/sleep 2))
+              (catch Exception e
+                (.add errors e))
+              (finally
+                (.countDown done-latch))))
+
+          (.countDown start-latch)
+          (.await done-latch 10 java.util.concurrent.TimeUnit/SECONDS)
+
+          (is (zero? (.size errors))
+              "===> no exceptions during concurrent sub/unsub-all")
+
+          ;; After the race, send a message to :a.
+          ;; Subscribers that survived unsub-all! should receive it.
+          ;; Subscribers that were properly cleaned up will timeout.
+          ;; No subscriber should be stuck (open but never receiving).
+          (channels/put! source {:type :a :val :after-race})
+
+          (doseq [ch surviving-chs]
+            (let [result (channels/take! ch 100)]
+              (is (or (= {:type :a :val :after-race} result)
+                      (and (nil? result) (channels/closed? ch))
+                      (= :timeout result))
+                  (str "===> subscriber either got message, is closed, or timed out — "
+                       "never stuck in a subscribed-but-dead state"))))
+
+          (channels/close! source))))))
+
 (deftest ^:functional pubsub-error-handling-tests
 
   (testing "ex-handler that throws does not prevent cleanup"
