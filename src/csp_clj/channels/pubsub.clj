@@ -147,19 +147,24 @@
         (.compute topic-mults topic
                   (reify BiFunction
                     (apply [_ _ existing-mult]
-                      ;; existing-mult is nil if topic doesn't exist yet
-                      (let [mult (or existing-mult
-                                     ;; Create new topic with internal channel
-                                     (let [internal-ch (if buf-fn
-                                                         ;; Buffered: buf-fn returns capacity
-                                                         ;; Edge case: nil/0 creates unbuffered
-                                                         (buffered/create (buf-fn topic))
-                                                         ;; No buf-fn: unbuffered channel
-                                                         (unbuffered/create))]
-                                       (multiplexer/create internal-ch)))]
-                        ;; Add subscriber to topic's multiplexer
-                        (multiplexer-protocol/tap! mult ch close?)
-                        ;; Return mult (puts in map if new, replaces if existing)
+                      ;; existing-mult is nil if topic does not exist yet.
+                      ;; Create the internal channel and multiplexer lazily.
+                      (let [internal-ch (when-not existing-mult
+                                          (if buf-fn
+                                            (buffered/create (buf-fn topic))
+                                            (unbuffered/create)))
+                            mult (or existing-mult
+                                     (multiplexer/create internal-ch))]
+                        (try
+                          (multiplexer-protocol/tap! mult ch close?)
+                          (catch Throwable e
+                            ;; If we just created a new topic and tap! fails,
+                            ;; close the internal channel to trigger the
+                            ;; multiplexer's EOF cleanup path (dispatch loop
+                            ;; exits, executor shutdown).  Prevents resource leak.
+                            (when internal-ch
+                              (channel-protocol/close! internal-ch))
+                            (throw e)))
                         mult))))
         ;; RACE WINDOW HANDLING: Check if pub closed during compute
         ;; This prevents orphaned subscriptions
