@@ -302,7 +302,7 @@
       ;; 2. Publisher state is marked as closed
       ;; 3. Consistent with pipeline exception handling
       (catch Throwable t
-        (ex-handler t)
+        (try (ex-handler t) (catch Throwable _))
         (.set closed true)
         ;; Cleanup all topics on any error
         (doseq [mult (.values topic-mults)]

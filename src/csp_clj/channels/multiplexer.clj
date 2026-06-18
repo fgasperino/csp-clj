@@ -211,7 +211,7 @@
                                     (finally
                                       (.arriveAndDeregister phaser)))))
                       ;; ERROR SCENARIO 3: Executor rejected task (fatal)
-                      (catch Exception e
+                      (catch Throwable e
                         ;; Must deregister since we registered but failed to execute
                         (.arriveAndDeregister phaser)
                         (throw e))))
@@ -224,7 +224,7 @@
       ;; Using shutdownNow instead of close to avoid deadlock if
       ;; previously-submitted tap tasks are still blocked on put!
       (catch Throwable t
-        (ex-handler t)
+        (try (ex-handler t) (catch Throwable _))
         (.set closed true)
         (doseq [[tap-ch close?] taps]
           (when close?
@@ -292,14 +292,14 @@
    (let [taps (ConcurrentHashMap.)
          executor (Executors/newVirtualThreadPerTaskExecutor)
          m (->Multiplexer source-ch taps executor ex-handler (java.util.concurrent.atomic.AtomicBoolean. false))]
-    ;; Start the dispatch loop on a virtual thread.
-    ;; If the thread fails to start, shut down the already-created
-    ;; executor to prevent resource leaks.
-    (try
-      (Thread/startVirtualThread
-       (fn []
-         (dispatch-loop m)))
-      m
-      (catch Throwable t
-        (.shutdownNow executor)
-        (throw t))))))
+     ;; Start the dispatch loop on a virtual thread.
+     ;; If the thread fails to start, shut down the already-created
+     ;; executor to prevent resource leaks.
+     (try
+       (Thread/startVirtualThread
+        (fn []
+          (dispatch-loop m)))
+       m
+       (catch Throwable t
+         (.shutdownNow executor)
+         (throw t))))))
