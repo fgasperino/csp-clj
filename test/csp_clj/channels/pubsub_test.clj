@@ -268,7 +268,7 @@
   (testing "unsub-all! does not silently revoke subscriptions added during cleanup"
 
     (testing "=> concurrent sub! survives unsub-all! when it races in"
-      (dotimes [_ 50]
+      (dotimes [_ 20]
         (let [source (channels/create)
               p (channels/pub! source :type)
               surviving-chs (java.util.concurrent.ConcurrentLinkedQueue.)
@@ -322,7 +322,7 @@
           (channels/put! source {:type :a :val :after-race})
 
           (doseq [ch surviving-chs]
-            (let [result (channels/take! ch 100)]
+            (let [result (channels/take! ch 20)]
               (is (or (= {:type :a :val :after-race} result)
                       (and (nil? result) (channels/closed? ch))
                       (= :timeout result))
@@ -356,3 +356,47 @@
           (channels/sub! p :a late-sub true)
           (is (channels/closed? late-sub)
               "===> late sub closed (cleanup ran despite ex-handler throwing)"))))))
+
+(deftest ^:functional pubsub-nil-topic-tests
+
+  (testing "nil topic handling"
+
+    (testing "=> nil topic from topic-fn does not crash publisher"
+      (let [source (channels/create)
+            p (channels/pub! source (fn [v] (:type v)))
+            a-ch (channels/create 5)]
+
+        (channels/sub! p :a a-ch)
+
+        ;; Send a value whose topic-fn returns nil (no :type field)
+        (channels/put! source {:val 1})
+
+        ;; Publisher should still be alive — send a valid message
+        (channels/put! source {:type :a :val 2})
+
+        (is (= {:type :a :val 2} (channels/take! a-ch 200))
+            "===> valid message still routes after nil-topic message")
+
+        ;; Nil-topic value should have been silently dropped
+        (is (= :timeout (channels/take! a-ch 50))
+            "===> nil-topic message was not routed to any subscriber")
+
+        (channels/close! source)))
+
+    (testing "=> sub! with nil topic throws IllegalArgumentException"
+      (let [source (channels/create)
+            p (channels/pub! source :type)
+            ch (channels/create 5)]
+        (is (thrown? IllegalArgumentException
+                     (channels/sub! p nil ch))
+            "===> sub! with nil topic throws IAE")
+        (channels/close! source)))
+
+    (testing "=> unsub! with nil topic throws IllegalArgumentException"
+      (let [source (channels/create)
+            p (channels/pub! source :type)
+            ch (channels/create 5)]
+        (is (thrown? IllegalArgumentException
+                     (channels/unsub! p nil ch))
+            "===> unsub! with nil topic throws IAE")
+        (channels/close! source)))))

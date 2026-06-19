@@ -230,6 +230,7 @@
           (when close?
             (protocol-channel/close! tap-ch)))
         (.clear taps)
+        (protocol-channel/close! source)
         (.shutdownNow executor)))))
 
 (defn create
