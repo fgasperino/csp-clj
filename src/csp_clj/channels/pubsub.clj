@@ -137,6 +137,8 @@
   ;;
   ;; Returns the subscribed channel.
   (sub! [_ topic ch close?]
+    (when (nil? topic)
+      (throw (IllegalArgumentException. "Topic must not be nil")))
     (if (.get closed)
       ;; Publisher already closed: close channel immediately if requested
       (when close?
@@ -196,6 +198,8 @@
   ;;
   ;; Returns nil (unlike sub! which returns the channel).
   (unsub! [_ topic ch]
+    (when (nil? topic)
+      (throw (IllegalArgumentException. "Topic must not be nil")))
     (.compute topic-mults topic
               (reify BiFunction
                 (apply [_ _ mult]
@@ -293,12 +297,14 @@
                 (channel-protocol/close! (:source mult))))
             ;; Value received - route to appropriate topic
             (let [topic (topic-fn val)]
-              ;; Lookup multiplexer for this topic
-              ;; Returns nil if topic has no subscribers (lazy topic doesn't exist yet)
-              (when-let [mult (.get topic-mults topic)]
-                ;; Route value to topic's internal channel
-                ;; The topic's multiplexer will broadcast to subscribers
-                (channel-protocol/put! (:source mult) val))
+              ;; Guard against nil topic: ConcurrentHashMap rejects nil keys.
+              ;; Since no subscriber can ever match a nil topic, values with
+              ;; nil topic are silently skipped without affecting the publisher.
+              (when topic
+                (when-let [mult (.get topic-mults topic)]
+                  ;; Route value to topic's internal channel
+                  ;; The topic's multiplexer will broadcast to subscribers
+                  (channel-protocol/put! (:source mult) val)))
               (recur)))))
       ;; EXCEPTION HANDLING FIX: Changed from Exception to Throwable
       ;; This ensures Error types (OOM, StackOverflow) are handled:
@@ -348,7 +354,7 @@
    Edge cases:
    - buf-fn returns nil or 0 → unbuffered channel created
    - buf-fn returns < 0 or non-number → undefined behavior
-   - topic-fn returns nil → routed to nil topic (valid but unusual)
+    - topic-fn returns nil → value skipped (no subscriber can match a nil topic)
 
    THREAD SAFETY
 
