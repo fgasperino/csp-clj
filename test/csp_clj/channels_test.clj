@@ -78,11 +78,11 @@
 
         (let [ch (channels/create)]
 
-          (is (true? (channels/close! ch))
+          (is (nil? (channels/close! ch))
               "===> first close succeeds")
-          (is (true? (channels/close! ch))
+          (is (nil? (channels/close! ch))
               "===> second close succeeds (idempotent)")
-          (is (true? (channels/close! ch))
+          (is (nil? (channels/close! ch))
               "===> third close succeeds (idempotent)")
           (is (true? (channels/closed? ch))
               "===> channel remains closed"))))

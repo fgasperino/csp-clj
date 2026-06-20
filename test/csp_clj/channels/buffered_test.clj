@@ -81,7 +81,7 @@
 
           (let [ch (buffered/create 5)]
 
-            (is (true? (channels/close! ch))
+            (is (nil? (channels/close! ch))
                 "====> phase 1: closed check passes, sets closed flag")
             (is (true? (channels/closed? ch))
                 "====> fast path: subsequent closed? checks return true")))
@@ -92,8 +92,8 @@
 
             (channels/close! ch)
 
-            (is (true? (channels/close! ch))
-                "====> fast path: closed check outside lock returns true immediately (idempotent)"))))
+            (is (nil? (channels/close! ch))
+                "====> fast path: closed check outside lock returns nil immediately (idempotent)"))))
 
       (testing "==> put! on closed channel"
 
