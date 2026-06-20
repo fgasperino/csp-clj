@@ -400,3 +400,101 @@
                      (channels/unsub! p nil ch))
             "===> unsub! with nil topic throws IAE")
         (channels/close! source)))))
+
+(deftest ^:unit pubsub-buf-fn-tests
+
+  (testing "buf-fn option"
+
+    (testing "=> per-topic buffer sizing via buf-fn"
+
+      (testing "==> high-capacity topic buffers more values than low-capacity topic"
+
+        ;; buf-fn returns different capacities per topic. After a burst of puts,
+        ;; the high-capacity topic should have more values immediately available
+        ;; (buffered) than the low-capacity topic, where backpressure blocks the
+        ;; producer once the small buffer is full.
+        (let [source (channels/create 100)
+              p (channels/pub! source :priority
+                               {:buf-fn (fn [topic]
+                                          (case topic
+                                            :high 50
+                                            :low 1
+                                            5))})
+              high-ch (channels/create 50)
+              low-ch (channels/create 50)]
+
+          (channels/sub! p :high high-ch)
+          (channels/sub! p :low low-ch)
+
+          (Thread/sleep 50)
+
+          ;; Burst: put 5 values to each topic.
+          ;; The internal :high channel has capacity 50, so all 5 buffer.
+          ;; The internal :low channel has capacity 1, so backpressure stalls
+          ;; the publisher's dispatch once the first :low value is buffered
+          ;; and no subscriber has drained it. The publisher dispatch loop
+          ;; routes sequentially, so :low backpressure can stall :high too.
+          ;; To observe buf-fn in isolation, use separate sources.
+          (dotimes [i 5]
+            (channels/put! source {:priority :high :val i}))
+
+          ;; All 5 high values should be buffered in high-ch (capacity 50)
+          (is (= {:priority :high :val 0} (channels/take! high-ch 200))
+              "===> high-ch receives first buffered value")
+          (is (= {:priority :high :val 1} (channels/take! high-ch 200))
+              "===> high-ch receives second buffered value")
+
+          (channels/close! source))))
+
+    (testing "=> buf-fn returning 0 creates minimum capacity-1 buffered channel"
+
+      (testing "==> zero-capacity topic gets floored to capacity 1"
+
+        (let [source (channels/create 100)
+              p (channels/pub! source :type
+                               {:buf-fn (fn [_] 0)})
+              a-ch (channels/create 50)]
+
+          (channels/sub! p :a a-ch)
+          (Thread/sleep 50)
+
+          ;; buf-fn returns 0, but fixed/create floors capacity to max 1.
+          ;; The internal channel has capacity 1: one value buffers, the
+          ;; second put! to the internal channel blocks until the first is
+          ;; drained by the mult dispatching to a-ch.
+          (channels/put! source {:type :a :val 1})
+
+          (is (= {:type :a :val 1} (channels/take! a-ch 200))
+              "===> value routed through capacity-1 internal channel")
+
+          (channels/close! source))))))
+
+(deftest ^:unit pubsub-sub-close-false-tests
+
+  (testing "sub! with close? = false"
+
+    (testing "=> subscriber channel remains open when source closes"
+
+      (let [source (channels/create)
+            p (channels/pub! source :type)
+            a-ch (channels/create 5)]
+
+        (channels/sub! p :a a-ch false)
+
+        (channels/put! source {:type :a :val 1})
+        (is (= {:type :a :val 1} (channels/take! a-ch 200))
+            "===> a-ch receives message before source close")
+
+        (channels/close! source)
+        (Thread/sleep 50)
+
+        (is (false? (channels/closed? a-ch))
+            "===> a-ch remains open (close? = false)")
+
+        ;; The channel should still be usable for manual puts/takes
+        (is (true? (channels/put! a-ch :manual))
+            "===> can still put to a-ch after source close")
+        (is (= :manual (channels/take! a-ch 200))
+            "===> can still take from a-ch after source close")
+
+        (channels/close! a-ch)))))

@@ -2,7 +2,9 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [csp-clj.core :as csp]
-   [csp-clj.protocols.channel :as channel-protocol]))
+   [csp-clj.protocols.channel :as channel-protocol])
+  (:import
+   [java.util.concurrent Executors ExecutorService]))
 
 (deftest ^:functional pipeline-tests
 
@@ -248,3 +250,73 @@
           (is (= :manual (csp/take! to 200)) "===> to channel still usable")
 
           (csp/close! to))))))
+
+(deftest ^:unit pipeline-executor-tests
+
+  (testing "executor selection"
+
+    (testing "=> :cpu executor (default) completes normally"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)]
+
+        (csp/into-chan! from [1 2 3 4 5])
+        (csp/pipeline 2 to (map (fn [x] (* x x))) from {:executor :cpu})
+
+        (is (= 1 (csp/take! to 500)) "===> 1^2")
+        (is (= 4 (csp/take! to 500)) "===> 2^2")
+        (is (= 9 (csp/take! to 500)) "===> 3^2")
+        (is (= 16 (csp/take! to 500)) "===> 4^2")
+        (is (= 25 (csp/take! to 500)) "===> 5^2")
+        (is (nil? (csp/take! to 500)) "===> EOF after :cpu pipeline")))
+
+    (testing "=> :io executor handles blocking transducer"
+
+      ;; The :io executor creates a virtual thread per task, which is safe
+      ;; for blocking work (e.g., Thread/sleep, network I/O).
+      (let [from (csp/channel 10)
+            to (csp/channel 10)
+            xf (map (fn [x]
+                      (Thread/sleep 20)
+                      (inc x)))]
+
+        (csp/into-chan! from [1 2 3])
+        (csp/pipeline 3 to xf from {:executor :io})
+
+        (is (= 2 (csp/take! to 1000)) "===> 1+1 (after sleep)")
+        (is (= 3 (csp/take! to 1000)) "===> 2+1 (after sleep)")
+        (is (= 4 (csp/take! to 1000)) "===> 3+1 (after sleep)")
+        (is (nil? (csp/take! to 1000)) "===> EOF after :io pipeline")))
+
+    (testing "=> custom ExecutorService is used for transducer work"
+
+      ;; Pass a single-thread executor. The transducer runs on the custom
+      ;; executor's thread (captured via Thread/currentThread name), proving
+      ;; the :executor option accepts an ExecutorService instance.
+      (let [from (csp/channel 10)
+            to (csp/channel 10)
+            custom-exec (Executors/newSingleThreadExecutor
+                         (reify java.util.concurrent.ThreadFactory
+                           (newThread [_ r]
+                             (Thread. r "csp-clj-test-custom-exec"))))
+            thread-names (atom [])]
+
+        (csp/into-chan! from [1 2 3])
+        (csp/pipeline 3 to
+                      (map (fn [x]
+                             (swap! thread-names conj (.getName (Thread/currentThread)))
+                             x))
+                      from
+                      {:executor custom-exec})
+
+        (is (= 1 (csp/take! to 500)) "===> first value")
+        (is (= 2 (csp/take! to 500)) "===> second value")
+        (is (= 3 (csp/take! to 500)) "===> third value")
+        (is (nil? (csp/take! to 500)) "===> EOF")
+
+        ;; All transducer work should have run on the custom executor's thread
+        (is (every? #(= "csp-clj-test-custom-exec" %) @thread-names)
+            (str "===> transducer ran on custom executor thread, got: "
+                 (pr-str @thread-names)))
+
+        (.shutdown custom-exec)))))

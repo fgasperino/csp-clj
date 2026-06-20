@@ -45,7 +45,26 @@
           (is (true? (channels/put! ch :test))
               "===> phase 1: put! finds taker via rendezvous")))
 
-      (testing "==> take! phase 2 blocks until matching put! arrives (rendezvous)"))
+      (testing "==> take! phase 2 blocks until matching put! arrives (rendezvous)"
+
+        (let [ch (unbuffered/create)
+              result (atom :pending)
+              latch (CountDownLatch. 1)]
+
+          (is (= :timeout (channels/take! ch 1))
+              "===> phase 2: take! blocks (no putter waiting)")
+
+          (future
+            (reset! result (channels/take! ch))
+            (.countDown latch))
+
+          (Thread/sleep 50)
+
+          (channels/put! ch :delivered)
+          (.await latch)
+
+          (is (= :delivered @result)
+              "===> take! completes with value from arriving put!"))))
 
     (testing "=> closed operations"
 

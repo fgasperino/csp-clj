@@ -412,3 +412,148 @@
           (is (nil? (channels/take! ch)) "===> takes nil (EOF)")
           (is (true? (channels/closed? ch)) "===> channel is closed"))))))
 
+(deftest ^:unit select!-edge-case-tests
+
+  (testing "select! edge cases"
+
+    (testing "=> empty operations throws IllegalArgumentException"
+
+      (is (thrown? IllegalArgumentException
+                   (channels/select! []))
+          "===> select! with no operations throws IAE"))
+
+    (testing "=> same channel appears twice in operations"
+
+      (testing "==> take and put on the same channel"
+
+        ;; Exercises the thread-ID guard in try-match!: two waiters from the
+        ;; same thread (same channel in select! ops) must not match each other.
+        ;; We close the channel to trigger the closed-channel fast path, which
+        ;; returns immediately without hanging or crashing.
+        (let [ch (channels/create)]
+
+          (channels/close! ch)
+
+          (let [result (channels/select! [[ch :take] [ch :put :val]])]
+
+            (is (or (= [ch :take nil] result)
+                    (= [ch :put false] result)
+                    (= [nil :other :shutdown] result))
+                (str "===> returns a closed-channel or shutdown result, got: " result)))))
+
+      (testing "==> two takes on the same unbuffered channel"
+
+        ;; With the same channel twice, select! enqueues two waiters on the
+        ;; same thread. The try-match! guard prevents self-matching. Closing
+        ;; the channel should wake one waiter with EOF.
+        (let [ch (channels/create)
+              result (atom nil)
+              latch (CountDownLatch. 1)]
+
+          (future
+            (reset! result (channels/select! [[ch :take] [ch :take]]))
+            (.countDown latch))
+
+          (Thread/sleep 50)
+          (channels/close! ch)
+          (.await latch 5 TimeUnit/SECONDS)
+
+          (is (= @result [ch :take nil])
+              (str "===> returns [ch :take nil] on closed channel, got: " @result)))))))
+
+(deftest ^:unit interruption-tests
+
+  (testing "thread interruption during blocking operations"
+
+    (testing "=> put! on unbuffered channel returns false when interrupted"
+
+      (let [ch (channels/create)
+            result (atom :pending)
+            latch (CountDownLatch. 1)
+            worker (atom nil)]
+
+        (let [t (Thread/startVirtualThread
+                 (fn []
+                   (try
+                     (reset! result (channels/put! ch :val))
+                     (finally
+                       (.countDown latch)))))]
+          (reset! worker t)
+
+          (Thread/sleep 50)
+
+          (is (= 1 (.size ^java.util.ArrayDeque (:puts ch)))
+              "===> put! is parked (waiter enqueued)")
+
+          (.interrupt ^Thread @worker)
+          (.await latch 5 TimeUnit/SECONDS)
+
+          (is (false? @result)
+              "===> put! returns false when interrupted")
+
+          (is (= 0 (.size ^java.util.ArrayDeque (:puts ch)))
+              "===> waiter cleaned up after interrupt"))))
+
+    (testing "=> take! on unbuffered channel returns nil when interrupted"
+
+      (let [ch (channels/create)
+            result (atom :pending)
+            latch (CountDownLatch. 1)
+            worker (atom nil)]
+
+        (let [t (Thread/startVirtualThread
+                 (fn []
+                   (try
+                     (reset! result (channels/take! ch))
+                     (finally
+                       (.countDown latch)))))]
+          (reset! worker t))
+
+        (Thread/sleep 50)
+
+        (is (= 1 (.size ^java.util.ArrayDeque (:takes ch)))
+            "===> take! is parked (waiter enqueued)")
+
+        (.interrupt ^Thread @worker)
+        (.await latch 5 TimeUnit/SECONDS)
+
+        (is (nil? @result)
+            "===> take! returns nil when interrupted")
+
+        (is (= 0 (.size ^java.util.ArrayDeque (:takes ch)))
+            "===> waiter cleaned up after interrupt")))
+
+    (testing "=> select! returns interrupted vector when interrupted"
+
+      (let [ch1 (channels/create)
+            ch2 (channels/create)
+            result (atom :pending)
+            latch (CountDownLatch. 1)
+            worker (atom nil)]
+
+        (let [t (Thread/startVirtualThread
+                 (fn []
+                   (try
+                     (reset! result (channels/select! [[ch1 :take] [ch2 :take]]))
+                     (finally
+                       (.countDown latch)))))]
+          (reset! worker t))
+
+        (Thread/sleep 50)
+
+        (is (= 1 (.size ^java.util.ArrayDeque (:takes ch1)))
+            "===> select! parked waiter on ch1")
+        (is (= 1 (.size ^java.util.ArrayDeque (:takes ch2)))
+            "===> select! parked waiter on ch2")
+
+        (.interrupt ^Thread @worker)
+        (.await latch 5 TimeUnit/SECONDS)
+
+        (is (= @result [nil :other :interrupted])
+            (str "===> select! returns [nil :other :interrupted], got: " @result))
+
+        (is (= 0 (.size ^java.util.ArrayDeque (:takes ch1)))
+            "===> ch1 waiter cleaned up after interrupt")
+        (is (= 0 (.size ^java.util.ArrayDeque (:takes ch2)))
+            "===> ch2 waiter cleaned up after interrupt")))))
+
