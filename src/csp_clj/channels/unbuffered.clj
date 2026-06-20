@@ -231,7 +231,7 @@
             (recur))))
       (finally
         (.unlock lock)))
-    true)
+    nil)
 
   (closed? [_]
     (.get closed))

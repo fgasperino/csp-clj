@@ -55,7 +55,7 @@
 
           (let [ch (unbuffered/create)]
 
-            (is (true? (channels/close! ch))
+            (is (nil? (channels/close! ch))
                 "====> succeeds")
             (is (true? (channels/closed? ch))
                 "====> then reports as closed")))
@@ -66,7 +66,7 @@
 
             (channels/close! ch)
 
-            (is (true? (channels/close! ch))
+            (is (nil? (channels/close! ch))
                 "====> close! is idempotent"))))
 
       (testing "==> put! on closed channel"
