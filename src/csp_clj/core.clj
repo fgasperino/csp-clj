@@ -72,10 +72,10 @@
      - value: the value to put (cannot be nil)
      - timeout-ms: optional timeout in milliseconds
    
-   Returns:
-     - true: value was successfully transferred
-     - false: channel is closed
-     - :timeout: timeout elapsed (if timeout-ms provided)
+Returns:
+      - true: value was successfully transferred
+      - false: channel is closed, or thread was interrupted
+      - :timeout: timeout elapsed (if timeout-ms provided)
    
    Example:
      (put! ch :value)       ; blocks indefinitely
@@ -210,11 +210,12 @@
      - source-ch: the source channel to multiplex from
      - opts: optional map with :ex-handler key for error handling
    
-   Options:
-     - :ex-handler - Function called on dispatch-loop errors (default: stderr)
-   
-   Returns:
-     A multiplexer implementing csp-clj.protocols.multiplexer/Multiplexer
+Options:
+      - :ex-handler - Function called on dispatch-loop errors
+                     (default: delegate to thread's uncaught exception handler)
+
+    Returns:
+      A multiplexer implementing csp-clj.protocols.multiplexer/Multiplexer
    
    Example:
      (def source (channel))
@@ -295,12 +296,13 @@
      - topic-fn: function to extract topic from value
      - opts: optional map with :buf-fn and :ex-handler keys
    
-   Options:
-     - :buf-fn - function (topic -> capacity), nil for unbuffered (default)
-     - :ex-handler - function called on dispatch-loop errors (default: stderr)
-   
-   Returns:
-     A publisher implementing csp-clj.protocols.publisher/Publisher
+Options:
+      - :buf-fn - function (topic -> capacity), nil for unbuffered (default)
+      - :ex-handler - function called on dispatch-loop errors
+                     (default: delegate to thread's uncaught exception handler)
+
+    Returns:
+      A publisher implementing csp-clj.protocols.publisher/Publisher
    
    Example:
      (def p (pub! ch :type))              ; topic is :type field
@@ -388,12 +390,12 @@
        - :executor - :cpu (work-stealing) or :io (virtual threads)
        - :ex-handler - function to handle exceptions
    
-   Returns:
-     nil (launches background processing)
-   
-   Example:
-     (pipeline 4 out-ch (map inc) in-ch)
-     (pipeline 8 out-ch (filter odd?) in-ch {:close? false})
+Returns:
+      the output channel (`to`), launches background processing
+    
+    Example:
+      (pipeline 4 out-ch (map inc) in-ch)
+      (pipeline 8 out-ch (filter odd?) in-ch {:close? false})
    
    See also: csp-clj.channels/pipeline"
   channels/pipeline)

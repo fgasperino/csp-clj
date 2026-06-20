@@ -151,8 +151,9 @@
    If the source channel is closed, the mult thread exits and will
    close all taps that were registered with close? = true.
 
-   Options:
-   - :ex-handler - Function to handle dispatch-loop errors (default: stderr)"
+Options:
+    - :ex-handler - Function to handle dispatch-loop errors
+                    (default: delegate to thread's uncaught exception handler)"
   ([source-ch]
    (multiplexer/create source-ch))
   ([source-ch opts]

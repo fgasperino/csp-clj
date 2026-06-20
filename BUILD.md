@@ -4,8 +4,8 @@ This project is now configured as a Clojure library using **tools.build**.
 
 ## Library Information
 
-- **Coordinates**: `io.github.fgasperino/csp-clj`
-- **Version**: `0.0.0`
+- **Coordinates**: `org.clojars.fgasperino/csp-clj`
+- **Version**: `0.0.2`
 - **License**: EPL-2.0 (Eclipse Public License v2.0)
 - **Developer**: Franco Gasperino <franco.gasperino@gmail.com>
 - **Repository**: https://github.com/fgasperino/csp-clj
@@ -18,7 +18,7 @@ All build tasks are run via the `:build` alias:
 # Display library information
 clj -T:build info
 
-# Build the JAR file (creates target/csp-clj-0.0.0.jar)
+# Build the JAR file (creates target/csp-clj-0.0.2.jar)
 clj -T:build jar
 
 # Install to local Maven repository (~/.m2)
@@ -58,12 +58,12 @@ clj -T:build deploy
 ```
 
 After deployment, your library will be available at:
-https://clojars.org/io.github.fgasperino/csp-clj
+https://clojars.org/org.clojars.fgasperino/csp-clj
 
 Users can add it to their `deps.edn`:
 
 ```clojure
-{:deps {io.github.fgasperino/csp-clj {:mvn/version "0.0.0"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.2"}}}
 ```
 
 ## Files Changed/Created
@@ -90,7 +90,7 @@ After running `clj -T:build install`, you can test the library in another projec
 
 ```clojure
 ;; In another project's deps.edn
-{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.0"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.2"}}}
 ```
 
 The dependency will resolve from your local `~/.m2` repository.
