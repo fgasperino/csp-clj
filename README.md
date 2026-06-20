@@ -439,6 +439,17 @@ The multiplexer applies **backpressure** by waiting for ALL taps to accept each 
 
 This design prioritizes reliability over speed - no messages are dropped, but slow consumers can throttle the system.
 
+#### Options
+
+`multiplex` accepts an optional opts map as its second argument:
+
+- `:ex-handler` - Function called when the dispatch loop encounters an error (Exception or Error). Default delegates to the thread's uncaught exception handler. The handler is invoked before resource cleanup; after it returns, all taps registered with `close? = true` are closed and the source channel is closed.
+
+```clojure
+(def m (csp/multiplex source-ch
+                     {:ex-handler (fn [e] (log/error e))}))
+```
+
 #### Complete Example: Log Replication with Backpressure
 
 This example demonstrates a log replication system with three consumers:
@@ -677,6 +688,7 @@ Unlike core.async `alts!`, csp-clj uses `select!` with an explicit return format
 - `[ch :take nil]` - channel was closed (EOF)
 - `[ch :put false]` - channel was closed, put rejected
 - `[nil :other :timeout]` - timeout elapsed, no operation completed
+- `[nil :other :interrupted]` - thread was interrupted while waiting
 - `[nil :other :shutdown]` - all channels closed
 
 #### Complete Example: Worker Pool Load Balancer

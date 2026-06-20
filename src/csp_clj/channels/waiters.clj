@@ -2,7 +2,7 @@
   "Internal concurrency primitives for channels.
    
    Provides the Waiter and Commit abstractions used to build
-   atomic multi-channel operations (alts!) and standard blocking
+   atomic multi-channel operations (select!) and standard blocking
    channel operations on virtual threads."
   (:import
    [java.util.concurrent.locks LockSupport]))
@@ -194,7 +194,7 @@
   ;; Get both commits for the rendezvous
   (let [^Commit c1 (get-commit w1)
         ^Commit c2 (get-commit w2)]
-    ;; Guard against matching a waiter with itself (e.g., alts! on same channel)
+    ;; Guard against matching a waiter with itself (e.g., select! on same channel)
     (if (= (.-id c1) (.-id c2))
       false
       ;; DEADLOCK PREVENTION: Lock ordering by thread ID

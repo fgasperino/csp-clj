@@ -126,7 +126,7 @@
   ;;
   ;; BUFFER FUNCTION:
   ;; When buf-fn is provided, calls (buf-fn topic) to get buffer capacity.
-  ;; If buf-fn returns nil or 0, creates unbuffered channel.
+  ;; If buf-fn returns 0, creates capacity-1 buffered channel (floored by fixed/create).
   ;; Negative values have undefined behavior.
   ;;
   ;; RACE CONDITION HANDLING:
@@ -352,7 +352,8 @@
                    Default: delegate to thread's uncaught exception handler.
 
    Edge cases:
-   - buf-fn returns nil or 0 → unbuffered channel created
+   - buf-fn returns 0 → capacity-1 buffered channel created (floored by fixed/create)
+   - buf-fn returns nil → NullPointerException (avoid returning nil from buf-fn)
    - buf-fn returns < 0 or non-number → undefined behavior
     - topic-fn returns nil → value skipped (no subscriber can match a nil topic)
 
