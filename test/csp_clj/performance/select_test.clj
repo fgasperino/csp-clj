@@ -87,3 +87,16 @@
       (criterium/quick-bench (run-async-alts-slow-path slow-iterations 5))
 
       (is true "Benchmarks completed successfully"))))
+
+(deftest ^:performance select-channel-scaling-performance-tests
+  (testing "select! vs alts!! Fast Path Scaling (varying channel count, 10k items per channel)"
+    ;; Reduced iterations (10k per channel per config) to keep total runtime
+    ;; bounded across 4 channel counts x 2 libraries x criterium's evals.
+    ;; Total selects scale with channel count: 10k x 2 = 20k, 10k x 50 = 500k.
+    (let [scaling-iterations 10000]
+      (doseq [num-channels [2 5 10 50]]
+        (println (str "\n--- BENCHMARKING (" num-channels " channels): csp-clj select! (fast path) ---"))
+        (criterium/quick-bench (run-csp-select-fast-path scaling-iterations num-channels))
+        (println (str "\n--- BENCHMARKING (" num-channels " channels): core.async alts!! (fast path) ---"))
+        (criterium/quick-bench (run-async-alts-fast-path scaling-iterations num-channels))))
+    (is true "Benchmarks completed successfully")))
