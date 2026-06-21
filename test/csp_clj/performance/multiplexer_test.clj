@@ -65,3 +65,15 @@
     (criterium/quick-bench (run-async-multiplexer iterations num-taps buffer-size))
 
     (is true "Benchmarks completed successfully")))
+
+(deftest ^:performance multiplexer-tap-scaling-performance-tests
+  (testing "Multiplexer Tap Scaling (varying tap count, 25k items per config)"
+    ;; Reduced iterations (25k per config) to keep total runtime bounded
+    ;; across 3 tap levels x 2 libraries x criterium's multiple evals.
+    (let [scaling-iterations 25000]
+      (doseq [taps [2 5 20]]
+        (println (str "\n--- BENCHMARKING (" taps " taps): csp-clj multiplexer ---"))
+        (criterium/quick-bench (run-csp-multiplexer scaling-iterations taps buffer-size))
+        (println (str "\n--- BENCHMARKING (" taps " taps): core.async mult ---"))
+        (criterium/quick-bench (run-async-multiplexer scaling-iterations taps buffer-size))))
+    (is true "Benchmarks completed successfully")))
