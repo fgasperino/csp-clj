@@ -238,95 +238,134 @@
                   :or {close? true
                        executor :cpu
                        ex-handler default-ex-handler}}]
-   (let [exec (get-executor executor)
-         jobs (buffered/create n)]
+   (if (= n 1)
+      ;; N=1 FAST PATH: single virtual thread, no CompletableFuture, no jobs
+      ;; channel, no executor submission. With parallelism=1 there is no
+      ;; concurrency to exploit, so the future + jobs round-trip + executor
+      ;; hop are pure overhead. This path applies the transducer synchronously
+      ;; on a single virtual thread.
+      ;;
+      ;; Preserved semantics (same as the n>1 path):
+      ;; - Output order matches input order (trivially — single thread).
+      ;; - Transducer applied to [v] (single-element vector).
+      ;; - Nil results from transducer are skipped.
+      ;; - :close? controls whether `to` is closed when `from` closes.
+      ;; - :ex-handler is called on transducer exceptions; the loop continues.
+      ;; - Early termination: if put! to `to` returns false (output closed),
+      ;;   the loop stops immediately (matches egress closing jobs in n>1).
+      ;; - :executor is accepted but unused (no executor submission).
+     (do
+       (Thread/startVirtualThread
+        (fn []
+          (try
+            (loop []
+              (let [v (channel-protocol/take! from)]
+                (when v
+                  (try
+                    (let [results (into [] xf [v])]
+                      (loop [rs (seq results)
+                             keep-going? true]
+                        (when (and rs keep-going?)
+                          (let [r (first rs)]
+                            (if (nil? r)
+                              (recur (next rs) true)
+                              (recur (next rs) (channel-protocol/put! to r)))))))
+                    (catch Throwable e
+                      (ex-handler e)))
+                  (recur))))
+            (finally
+              (when close?
+                (channel-protocol/close! to))))))
+       to)
 
-      ;; EGRESS THREAD: Takes futures in order, puts results in order
-     (Thread/startVirtualThread
-      (fn []
-        (try
-          (loop []
-             ;; BLOCKING: Wait for next CompletableFuture from jobs channel
-            (let [future-job (channel-protocol/take! jobs)]
-              (if (nil? future-job)
-                 ;; Jobs channel closed - ingress finished, drain complete
-                nil
-                (let [^CompletableFuture f future-job
-                       ;; BLOCKING: Wait for THIS SPECIFIC computation to complete
-                       ;; This maintains ordering: we wait for f1 even if f2 finished first
-                      results (.get f)
-                       ;; Transducer applied to [v] produces 0-N results (sequence)
-                      keep-going? (loop [rs (seq results)]
-                                    (if rs
-                                      (let [v (first rs)]
-                                        (if (nil? v)
-                                           ;; Skip nil values from transducer
-                                          (recur (next rs))
-                                          (if (channel-protocol/put! to v)
-                                             ;; Successfully put to output, continue
+      ;; N>1 PATH: two virtual threads (ingress + egress) + jobs channel +
+      ;; CompletableFuture for ordering.
+     (let [exec (get-executor executor)
+           jobs (buffered/create n)]
+
+        ;; EGRESS THREAD: Takes futures in order, puts results in order
+       (Thread/startVirtualThread
+        (fn []
+          (try
+            (loop []
+               ;; BLOCKING: Wait for next CompletableFuture from jobs channel
+              (let [future-job (channel-protocol/take! jobs)]
+                (if (nil? future-job)
+                   ;; Jobs channel closed - ingress finished, drain complete
+                  nil
+                  (let [^CompletableFuture f future-job
+                         ;; BLOCKING: Wait for THIS SPECIFIC computation to complete
+                         ;; This maintains ordering: we wait for f1 even if f2 finished first
+                        results (.get f)
+                         ;; Transducer applied to [v] produces 0-N results (sequence)
+                        keep-going? (loop [rs (seq results)]
+                                      (if rs
+                                        (let [v (first rs)]
+                                          (if (nil? v)
+                                             ;; Skip nil values from transducer
                                             (recur (next rs))
-                                             ;; Output channel closed - signal early termination
-                                            false)))
-                                      true))]
-                  (if keep-going?
-                    (recur)
-                     ;; Output closed: close jobs to signal ingress to stop immediately
-                    (channel-protocol/close! jobs))))))
-           ;; EXCEPTION HANDLING FIX: Catch Throwable (not just Exception)
-           ;; Catching Throwable ensures:
-           ;; 1. Error types (OOM, StackOverflow) are reported via ex-handler
-           ;; 2. Channels are always closed properly even on fatal errors
-           ;; 3. User has visibility into all failure modes
-           ;; 4. Symmetry with ingress thread exception handling
-          (catch Throwable t
-            (ex-handler t))
-          (finally
-             ;; Always cleanup: close jobs and optionally close output
-            (channel-protocol/close! jobs)
-            (when close?
-              (channel-protocol/close! to))))))
+                                            (if (channel-protocol/put! to v)
+                                               ;; Successfully put to output, continue
+                                              (recur (next rs))
+                                               ;; Output channel closed - signal early termination
+                                              false)))
+                                        true))]
+                    (if keep-going?
+                      (recur)
+                       ;; Output closed: close jobs to signal ingress to stop immediately
+                      (channel-protocol/close! jobs))))))
+             ;; EXCEPTION HANDLING: Catch Throwable (not just Exception) to ensure
+             ;; Error types (OOM, StackOverflow) are reported via ex-handler and
+             ;; channels are always closed properly.
+            (catch Throwable t
+              (ex-handler t))
+            (finally
+               ;; Always cleanup: close jobs and optionally close output
+              (channel-protocol/close! jobs)
+              (when close?
+                (channel-protocol/close! to))))))
 
-      ;; INGRESS THREAD: Takes from input, creates futures, submits work
-     (Thread/startVirtualThread
-      (fn []
-        (try
-          (loop []
-             ;; BLOCKING: Wait for input from 'from' channel
-            (let [v (channel-protocol/take! from)]
-              (if (nil? v)
-                 ;; Input channel closed - stop accepting new work
-                nil
-                (let [f (CompletableFuture.)]
-                   ;; BLOCKING POINT: Put future onto jobs queue
-                   ;; This limits parallelism to n because jobs is buffered with size n
-                   ;; When full, this blocks, applying backpressure to the source
-                  (if (channel-protocol/put! jobs f)
-                    (do
-                       ;; Submit transducer work to executor
-                       ;; The transducer is applied to [v] (single-element vector)
-                       ;; This matters for stateful transducers (partition-all, dedupe, etc.)
-                      (try
-                        (.execute exec
-                                  (fn []
-                                    (try
-                                      (let [results (into [] xf [v])]
-                                        (.complete f results))
-                                      (catch Throwable e
-                                        (try
-                                          (ex-handler e)
-                                          (finally
-                                            (.complete f [])))))))
-                        (catch Throwable e
-                          (.complete f [])
-                          (throw e)))
-                      (recur))
-                     ;; Jobs channel was closed by egress (output channel closed)
-                     ;; Exit immediately, dropping any pending input
-                    nil)))))
-           ;; Catch all exceptions/errors for reporting
-          (catch Throwable t
-            (ex-handler t))
-          (finally
-             ;; Signal egress to drain and exit
-            (channel-protocol/close! jobs)))))
-     to)))
+        ;; INGRESS THREAD: Takes from input, creates futures, submits work
+       (Thread/startVirtualThread
+        (fn []
+          (try
+            (loop []
+               ;; BLOCKING: Wait for input from 'from' channel
+              (let [v (channel-protocol/take! from)]
+                (if (nil? v)
+                   ;; Input channel closed - stop accepting new work
+                  nil
+                  (let [f (CompletableFuture.)]
+                     ;; BLOCKING POINT: Put future onto jobs queue
+                     ;; This limits parallelism to n because jobs is buffered with size n
+                     ;; When full, this blocks, applying backpressure to the source
+                    (if (channel-protocol/put! jobs f)
+                      (do
+                         ;; Submit transducer work to executor
+                         ;; The transducer is applied to [v] (single-element vector)
+                         ;; This matters for stateful transducers (partition-all, dedupe, etc.)
+                        (try
+                          (.execute exec
+                                    (fn []
+                                      (try
+                                        (let [results (into [] xf [v])]
+                                          (.complete f results))
+                                        (catch Throwable e
+                                          (try
+                                            (ex-handler e)
+                                            (finally
+                                              (.complete f [])))))))
+                          (catch Throwable e
+                            (.complete f [])
+                            (throw e)))
+                        (recur))
+                       ;; Jobs channel was closed by egress (output channel closed)
+                       ;; Exit immediately, dropping any pending input
+                      nil)))))
+             ;; Catch all exceptions/errors for reporting
+            (catch Throwable t
+              (ex-handler t))
+            (finally
+               ;; Signal egress to drain and exit
+              (channel-protocol/close! jobs)))))
+       to))))

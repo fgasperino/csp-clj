@@ -207,13 +207,16 @@
       (let [source (channels/create)
             handler-called (atom false)
             m (channels/multiplex source
-                 {:ex-handler (fn [_]
-                                (reset! handler-called true)
-                                (throw (RuntimeException. "ex-handler boom")))})]
+                                  {:ex-handler (fn [_]
+                                                 (reset! handler-called true)
+                                                 (throw (RuntimeException. "ex-handler boom")))})]
 
-        ;; Add a tap so the dispatch loop has work to do
-        (let [tap-ch (channels/create 10)]
+        ;; Add TWO taps so the dispatch loop uses the multi-tap executor path
+        ;; (the single-tap fast path bypasses the executor entirely).
+        (let [tap-ch (channels/create 10)
+              tap-ch2 (channels/create 10)]
           (channels/tap! m tap-ch)
+          (channels/tap! m tap-ch2)
 
           ;; Shut down the multiplexer's executor to cause RejectedExecutionException
           (.shutdownNow ^java.util.concurrent.ExecutorService (:executor m))
