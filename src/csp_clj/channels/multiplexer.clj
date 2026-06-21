@@ -1,28 +1,31 @@
 (ns csp-clj.channels.multiplexer
   "Multiplexer implementation for broadcasting channel values.
-   
+    
    Provides a mechanism to distribute values from a single source
    channel to multiple tap channels concurrently.
-   
+    
    Key Concepts for New Developers:
    - Source channel: The single input channel being read
    - Tap channels: Multiple output channels receiving all values
    - Backpressure: Applied via Phaser - mult waits for all taps
    - Concurrency: Each tap dispatch runs in its own virtual thread
-   
+   - Snapshot reuse: A dirty flag avoids re-snapshotting the tap set every value
+    
    Algorithm Overview:
    1. Virtual thread continuously takes from source
-   2. For each value, snapshots current taps (TOCTOU-safe)
-   3. Each tap gets its own virtual thread via ExecutorService
-   4. Phaser synchronizes completion - applies backpressure
-   5. Failed/closed taps are automatically removed
-   
+   2. For each value, uses cached tap snapshot (re-snapshots only when dirty)
+   3. Single-tap fast path: dispatches directly on the dispatcher thread
+   4. Multi-tap path: each tap gets its own virtual thread via ExecutorService
+   5. Phaser synchronizes completion - applies backpressure
+   6. Failed/closed taps are automatically removed
+    
    Called by: csp-clj.channels/multiplex, csp-clj.core/multiplex"
   (:require
    [csp-clj.protocols.channel :as protocol-channel]
    [csp-clj.protocols.multiplexer :as protocol-multiplexer])
   (:import
-   [java.util.concurrent ConcurrentHashMap Executors]))
+   [java.util.concurrent ConcurrentHashMap Executors]
+   [java.util.concurrent.atomic AtomicBoolean]))
 
 (set! *warn-on-reflection* true)
 
@@ -90,15 +93,19 @@
 ;; source - Source channel to read from (single input)
 ;; taps - ConcurrentHashMap<Channel, Boolean> (channel -> close-on-shutdown?)
 ;; executor - VirtualThreadPerTaskExecutor for concurrent dispatch
+;; ex-handler - Function for dispatch-loop errors
 ;; closed - AtomicBoolean, true when source closed or error occurred
+;; dirty - AtomicBoolean, set by tap!/untap!/untap-all! and by failed-tap
+;;         removal to signal the dispatch-loop to re-snapshot the tap set.
+;;         The dispatch-loop CAS-resets it to false when it re-snapshots.
 ;;
 ;; See also: csp-clj.protocols.multiplexer, csp-clj.channels.pubsub (topic-based)
-(defrecord Multiplexer [source ^ConcurrentHashMap taps ^java.util.concurrent.ExecutorService executor ex-handler ^java.util.concurrent.atomic.AtomicBoolean closed]
+(defrecord Multiplexer [source ^ConcurrentHashMap taps ^java.util.concurrent.ExecutorService executor ex-handler ^AtomicBoolean closed ^AtomicBoolean dirty]
   protocol-multiplexer/Multiplexer
 
   ;; TOCTOU RACE HANDLING:
   ;; 1. Check closed flag (fast path)
-  ;; 2. Add tap to map
+  ;; 2. Add tap to map, mark dirty
   ;; 3. Re-check closed flag (window: dispatch-loop closed between 1-2)
   ;; 4. If closed in step 3, remove tap and close it if requested
   (tap! [_ ch close?]
@@ -109,6 +116,8 @@
       (do
         ;; Add tap to map (visible to next dispatch-loop iteration)
         (.put taps ch close?)
+        ;; Signal the dispatch-loop to re-snapshot its cached tap list
+        (.set dirty true)
         ;; Re-check closed flag to prevent race condition where
         ;; dispatch-loop closed and cleared taps right before we put.
         ;; This ensures tap is either fully registered OR closed, never orphaned.
@@ -126,11 +135,13 @@
   ;; more value before removal takes effect (TOCTOU tradeoff).
   (untap! [_ ch]
     (.remove taps ch)
+    (.set dirty true)
     nil)
 
   ;; Remove all taps. Safe to call from any thread.
   (untap-all! [_]
     (.clear taps)
+    (.set dirty true)
     nil))
 
 (defn- default-ex-handler
@@ -151,10 +162,20 @@
   "Background loop that routes messages from source to all taps.
 
    Algorithm: Runs on a dedicated virtual thread. Takes from source
-   channel, then dispatches to all registered taps concurrently.
-   Each tap gets its own virtual thread via the executor. Uses a
-   Phaser for synchronization - applies backpressure by waiting for
-   all taps to complete before taking next value.
+   channel, then dispatches to all registered taps.
+
+   OPTIMIZATIONS (vs original version):
+   1. Snapshot reuse — a cached tap-list vector is reused across values
+      when the tap set hasn't changed (tracked by the dirty AtomicBoolean).
+      Only re-snapshots when tap!/untap!/untap-all! or a failed-tap removal
+      sets dirty. Avoids 100k vector allocations for a stable tap set.
+   2. Single-tap fast path — when exactly one tap is registered, dispatches
+      directly on the dispatcher thread (blocking put!). Skips the executor
+      submission and the Phaser entirely. One tap = no parallelism to exploit,
+      so the executor hop is pure overhead.
+
+   Backpressure: The dispatcher waits on a per-value Phaser until all tap
+   tasks complete. This is semantically identical to the original behavior.
 
    Error handling: Removes taps that reject values or throw exceptions.
    Cleans up resources on source close or exception.
@@ -165,9 +186,11 @@
         ^ConcurrentHashMap taps (:taps mult)
         ^java.util.concurrent.ExecutorService executor (:executor mult)
         ex-handler (:ex-handler mult)
-        ^java.util.concurrent.atomic.AtomicBoolean closed (:closed mult)]
+        ^AtomicBoolean closed (:closed mult)
+        ^AtomicBoolean dirty (:dirty mult)]
     (try
-      (loop []
+      (loop [entries nil  ;; cached snapshot, nil means "needs (re)snapshot"
+             entries-set? false]  ;; have we snapshotted at least once?
         ;; BLOCKING POINT: Wait for value from source (backpressure source here)
         (let [val (protocol-channel/take! source)]
           (if (nil? val)
@@ -180,46 +203,56 @@
                   (protocol-channel/close! tap-ch)))
               (.clear taps)
               (.shutdownNow executor))
-            ;; Value received - dispatch to all taps
-            ;; TOCTOU-SAFE SNAPSHOT: Create immutable view of current taps
-            ;; ConcurrentHashMap iterator is weakly consistent - safe to snapshot
-            (let [entries (vec taps)]
+            ;; Value received - obtain the current tap snapshot
+            (let [;; Re-snapshot only if dirty (or first iteration).
+                  ;; CAS-reset dirty to false; if it was already false, reuse entries.
+                  need-snapshot (or (not entries-set?)
+                                    (.getAndSet dirty false))
+                  entries (if need-snapshot (vec taps) entries)]
               (if (empty? entries)
                 ;; No taps registered, just consume and loop
-                (recur)
-                ;; DISPATCH PHASE: Send to all taps concurrently
-                (let [;; Phaser with 1 party (the dispatcher itself)
-                      ;; Each tap will register as an additional party
-                      phaser (java.util.concurrent.Phaser. 1)]
-                  (doseq [[tap-ch _] entries]
-                    ;; Register this tap as a party in the phaser
-                    (.register phaser)
-                    (try
-                      ;; Dispatch to tap in its own virtual thread
-                      (.execute executor
-                                (fn []
-                                  (try
-                                    ;; Attempt to put value to tap
-                                    (let [success (protocol-channel/put! tap-ch val)]
-                                      ;; ERROR SCENARIO 1: Tap closed during put
-                                      (when-not success
-                                        (.remove taps tap-ch)))
-                                    ;; ERROR SCENARIO 2: Tap threw exception/error
-                                    (catch Throwable _
-                                      (.remove taps tap-ch))
-                                    ;; ALWAYS deregister, even on failure
-                                    (finally
-                                      (.arriveAndDeregister phaser)))))
-                      ;; ERROR SCENARIO 3: Executor rejected task (fatal)
-                      (catch Throwable e
-                        ;; Must deregister since we registered but failed to execute
-                        (.arriveAndDeregister phaser)
-                        (throw e))))
-                  ;; BACKPRESSURE POINT: Wait for all taps to complete
-                  ;; This blocks the dispatch-loop until every tap has finished
-                  ;; If any tap blocks (full buffer, unbuffered wait), mult blocks
-                  (.arriveAndAwaitAdvance phaser)
-                  (recur)))))))
+                (recur entries true)
+                ;; DISPATCH PHASE
+                (let [n (count entries)]
+                  (if (= n 1)
+                    ;; SINGLE-TAP FAST PATH: dispatch directly on this thread.
+                    ;; One tap = no parallelism to exploit; the executor
+                    ;; submission + barrier are pure overhead.
+                    (let [[[tap-ch _]] entries]  ;; destructure first MapEntry
+                      (try
+                        (let [success (protocol-channel/put! tap-ch val)]
+                          (when-not success
+                            (.remove taps tap-ch)
+                            (.set dirty true)))
+                        (catch Throwable _
+                          (.remove taps tap-ch)
+                          (.set dirty true))))
+                    ;; MULTI-TAP PATH: dispatch to all taps concurrently via
+                    ;; the executor. Uses a per-value Phaser for backpressure.
+                    ;; The Phaser's internal spin-then-park is more efficient
+                    ;; than a hand-rolled LockSupport barrier for the short
+                    ;; waits typical of buffered tap channels.
+                    (let [phaser (java.util.concurrent.Phaser. 1)]
+                      (doseq [[tap-ch _] entries]
+                        (.register phaser)
+                        (try
+                          (.execute executor
+                                    (fn []
+                                      (try
+                                        (let [success (protocol-channel/put! tap-ch val)]
+                                          (when-not success
+                                            (.remove taps tap-ch)
+                                            (.set dirty true)))
+                                        (catch Throwable _
+                                          (.remove taps tap-ch)
+                                          (.set dirty true))
+                                        (finally
+                                          (.arriveAndDeregister phaser)))))
+                          (catch Throwable e
+                            (.arriveAndDeregister phaser)
+                            (throw e))))
+                      (.arriveAndAwaitAdvance phaser)))
+                  (recur entries true)))))))
       ;; Exception/Error handler: Clean up and mark closed
       ;; Using shutdownNow instead of close to avoid deadlock if
       ;; previously-submitted tap tasks are still blocked on put!
@@ -292,10 +325,12 @@
   ([source-ch {:keys [ex-handler] :or {ex-handler default-ex-handler}}]
    (let [taps (ConcurrentHashMap.)
          executor (Executors/newVirtualThreadPerTaskExecutor)
-         m (->Multiplexer source-ch taps executor ex-handler (java.util.concurrent.atomic.AtomicBoolean. false))]
-     ;; Start the dispatch loop on a virtual thread.
-     ;; If the thread fails to start, shut down the already-created
-     ;; executor to prevent resource leaks.
+         m (->Multiplexer source-ch taps executor ex-handler
+                          (AtomicBoolean. false)
+                          (AtomicBoolean. true))]  ;; dirty=true so first iteration snapshots
+      ;; Start the dispatch loop on a virtual thread.
+      ;; If the thread fails to start, shut down the already-created
+      ;; executor to prevent resource leaks.
      (try
        (Thread/startVirtualThread
         (fn []

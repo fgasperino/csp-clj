@@ -27,12 +27,34 @@
 ;; All mutable state is protected by a single ReentrantLock (monitor pattern).
 ;; CRITICAL INVARIANT: The lock is NEVER held while parking a virtual thread.
 ;;
-;; TWO-PHASE COMMIT PATTERN
+;; TWO-PHASE COMMIT PATTERN (AND FAST PATHS)
 ;;
 ;; Blocking operations use the csp-clj.channels.waiters namespace:
 ;; - Commit: Holds thread reference and mutable state (nil=pending, else=result)
 ;; - Waiters: Encapsulate operation (take/put) and associated Commit
 ;; - park-and-wait: Parks thread, waits for another thread to complete the commit
+;;
+;; Fast paths (buffer hit, closed-under-lock, rendezvous with a waiting partner)
+;; complete synchronously under the channel lock and return directly WITHOUT
+;; allocating a Commit/Waiter. Only the blocking branch (no partner and no
+;; buffer space / no putter) allocates a Commit + Waiter, enqueues it, releases
+;; the lock, and parks in phase 2.
+;;
+;; DESIGN NOTE — lost invariant: previously every operation, fast or slow, had
+;; its own Commit so the code followed a single uniform shape (phase 1 produces
+;; a commit state, phase 2 reads it). Fast paths now bypass that machinery.
+;; Concurrency safety is preserved because:
+;;   - the active side holds the channel lock through phase 1, so no third party
+;;     can observe or interfere with a fast-path operation;
+;;   - the PARTNER side of a rendezvous is still fulfilled through the locked
+;;     try-commit! (so racing with the partner's timeout/interrupt/another
+;;     select! is still handled correctly);
+;;   - backpressure relief in take! still uses try-commit! on polled putters;
+;;   - memory visibility is provided by ReentrantLock's unlock fence and the
+;;     volatile AtomicBoolean `closed`, NOT by the Commit's volatile state.
+;; Future features that require "every in-flight operation has a Commit"
+;; (cancellation, observation, tracing) must special-case these fast paths or
+;; be scoped to blocking operations only.
 ;;
 ;; Phase 1 (under lock): Check if operation can complete. If not, create Commit
 ;; and add Waiter to takes/puts queue. Release lock.
@@ -43,15 +65,15 @@
 ;; STATE TRANSITIONS
 ;;
 ;; put!:
-;; - takes queue non-empty: Direct handoff via try-match! (rendezvous)
-;; - buffer has space: Add to buffer, complete immediately
-;; - buffer full: Enqueue in puts, park until space available
+;; - takes queue non-empty: Direct handoff via try-commit! on the taker (rendezvous)
+;; - buffer has space: Add to buffer, return true directly
+;; - buffer full: Enqueue Commit/Waiter in puts, park until space available
 ;;
 ;; take!:
-;; - buffer non-empty: Remove from buffer, complete immediately
+;; - buffer non-empty: Remove from buffer, return value directly
 ;;   - Then: Pull from puts queue to refill buffer (backpressure relief)
-;; - buffer empty+closed: Return EOF
-;; - buffer empty: Enqueue in takes, park until value available
+;; - buffer empty+closed: Return nil (EOF) directly
+;; - buffer empty: Enqueue Commit/Waiter in takes, park until value available
 ;;
 ;; SELECT INTEGRATION
 ;;
@@ -81,49 +103,58 @@
     ;; Fast-path closed check outside lock
     (if (.get closed)
       false
-      (let [commit (waiters/new-commit)
-            waiter (waiters/->PutWaiter commit value)]
-        ;; Phase 1: Acquire lock, check state, maybe enqueue waiter
-        (.lock lock)
-        (try
-          ;; Recheck closed inside lock (race condition window)
-          (if (.get closed)
-            (do (waiters/try-commit! waiter waiters/PUT_FAIL) false)
-            ;; Rendezvous optimization: Direct handoff to waiting taker
-            (if (loop []
-                  (when-let [t (waiters/poll! takes)]
-                    (if (waiters/try-match! t waiter value)
-                      t
-                      (recur))))
-              true
-              ;; No takers waiting. Check buffer capacity.
-              (if-not (buffer-protocol/full? buf)
-                (do
-                  (buffer-protocol/add! buf value)
-                  (waiters/try-commit! waiter true)
-                  true)
-                ;; Buffer full, must block. Enqueue in puts queue.
-                (do
-                  (.add puts waiter)
-                  false))))
-          (finally
-            (.unlock lock)))
+      ;; Phase 1: Acquire lock, resolve fast paths without allocating a Commit;
+      ;; only allocate Commit/Waiter on the blocking (buffer-full) branch.
+      (let [outcome (try
+                      (.lock lock)
+                      (cond
+                        ;; Recheck closed inside lock (race condition window)
+                        (.get closed) :closed
 
-        ;; Phase 2: Park and wait for completion (lock released)
-        (let [^csp_clj.channels.waiters.Commit commit commit
-              state (waiters/get-state commit)]
-          (if-not (nil? state)
-            state
-            (let [res (waiters/park-and-wait commit nil)]
-              (if (= res :timeout)
-                (do
-                  (selectable-protocol/cancel-wait! this waiter)
-                  res)
-                (if (= res :interrupted)
+                        ;; Rendezvous: fulfill a waiting taker directly. The
+                        ;; active putter needs no commit of its own and just
+                        ;; returns true. Single-lock commit replaces the old
+                        ;; double-lock try-match! on the hot path.
+                        (loop []
+                          (when-let [t (waiters/poll! takes)]
+                            (if (waiters/try-commit! t value)
+                              true
+                              (recur))))
+                        :rendezvous
+
+                        ;; Buffer has space: add and complete immediately.
+                        (not (buffer-protocol/full? buf))
+                        (do (buffer-protocol/add! buf value) :added)
+
+                        ;; Buffer full: allocate now, enqueue, park after unlock.
+                        :else
+                        (let [commit (waiters/new-commit)
+                              waiter (waiters/->PutWaiter commit value)]
+                          (.add puts waiter)
+                          [:block commit waiter]))
+                      (finally
+                        (.unlock lock)))]
+        (if (vector? outcome)
+          ;; Phase 2: Park and wait for completion (lock released)
+          (let [[_ commit waiter] outcome
+                ^csp_clj.channels.waiters.Commit commit commit
+                state (waiters/get-state commit)]
+            (if-not (nil? state)
+              state
+              (let [res (waiters/park-and-wait commit nil)]
+                (if (= res :timeout)
                   (do
                     (selectable-protocol/cancel-wait! this waiter)
-                    false)
-                  res))))))))
+                    res)
+                  (if (= res :interrupted)
+                    (do
+                      (selectable-protocol/cancel-wait! this waiter)
+                      false)
+                    res)))))
+          (case outcome
+            :closed false
+            :rendezvous true
+            :added true)))))
 
   (put! [this value timeout-ms]
     (when (nil? value)
@@ -131,119 +162,131 @@
 
     (if (.get closed)
       false
-      (let [commit (waiters/new-commit)
-            waiter (waiters/->PutWaiter commit value)]
-        (.lock lock)
-        (try
-          (if (.get closed)
-            (do (waiters/try-commit! waiter waiters/PUT_FAIL) false)
-            (if (loop []
-                  (when-let [t (waiters/poll! takes)]
-                    (if (waiters/try-match! t waiter value)
-                      t
-                      (recur))))
-              true
-              (if-not (buffer-protocol/full? buf)
-                (do
-                  (buffer-protocol/add! buf value)
-                  (waiters/try-commit! waiter true)
-                  true)
-                (do
-                  (.add puts waiter)
-                  false))))
-          (finally
-            (.unlock lock)))
+      (let [outcome (try
+                      (.lock lock)
+                      (cond
+                        (.get closed) :closed
 
-        (let [^csp_clj.channels.waiters.Commit commit commit
-              state (waiters/get-state commit)]
-          (if-not (nil? state)
-            state
-            (let [res (waiters/park-and-wait commit timeout-ms)]
-              (if (= res :timeout)
-                (do
-                  (selectable-protocol/cancel-wait! this waiter)
-                  res)
-                (if (= res :interrupted)
+                        (loop []
+                          (when-let [t (waiters/poll! takes)]
+                            (if (waiters/try-commit! t value)
+                              true
+                              (recur))))
+                        :rendezvous
+
+                        (not (buffer-protocol/full? buf))
+                        (do (buffer-protocol/add! buf value) :added)
+
+                        :else
+                        (let [commit (waiters/new-commit)
+                              waiter (waiters/->PutWaiter commit value)]
+                          (.add puts waiter)
+                          [:block commit waiter]))
+                      (finally
+                        (.unlock lock)))]
+        (if (vector? outcome)
+          (let [[_ commit waiter] outcome
+                ^csp_clj.channels.waiters.Commit commit commit
+                state (waiters/get-state commit)]
+            (if-not (nil? state)
+              state
+              (let [res (waiters/park-and-wait commit timeout-ms)]
+                (if (= res :timeout)
                   (do
                     (selectable-protocol/cancel-wait! this waiter)
-                    false)
-                  res))))))))
+                    res)
+                  (if (= res :interrupted)
+                    (do
+                      (selectable-protocol/cancel-wait! this waiter)
+                      false)
+                    res)))))
+          (case outcome
+            :closed false
+            :rendezvous true
+            :added true)))))
 
   (take! [this]
-    (let [commit (waiters/new-commit)
-          waiter (waiters/->TakeWaiter commit)]
-      ;; Phase 1: Acquire lock, check buffer state
-      (.lock lock)
-      (try
-        (if (> (buffer-protocol/size buf) 0)
-          ;; Value available: Remove from buffer and complete
-          (let [val (buffer-protocol/remove! buf)]
-            (waiters/try-commit! waiter val)
-            ;; Backpressure relief: Pull waiting put into now-empty slot
-            (loop []
-              (when-let [putter (waiters/poll! puts)]
-                (if (waiters/try-commit! putter true)
-                  (buffer-protocol/add! buf (waiters/get-value putter))
-                  (recur))))
-            true)
-          ;; Buffer empty
-          (if (.get closed)
-            ;; Channel closed: Signal EOF
-            (do (waiters/try-commit! waiter waiters/EOF) false)
-            ;; Must block: Enqueue in takes queue
-            (do
-              (.add takes waiter)
-              false)))
-        (finally
-          (.unlock lock)))
-
-      ;; Phase 2: Park and wait for completion
-      (let [^csp_clj.channels.waiters.Commit commit commit
-            state (waiters/get-state commit)
-            final-state (if-not (nil? state)
-                          state
-                          (waiters/park-and-wait commit nil))]
-        (when (or (= final-state :timeout) (= final-state :interrupted))
-          (selectable-protocol/cancel-wait! this waiter))
-        (cond
-          (= final-state :interrupted) nil
-          (identical? final-state waiters/EOF) nil
-          :else final-state))))
+    ;; Phase 1: Acquire lock, resolve fast paths without allocating a Commit;
+    ;; only allocate Commit/Waiter on the blocking (empty buffer) branch.
+    (let [outcome (try
+                    (.lock lock)
+                    (if (> (buffer-protocol/size buf) 0)
+                      ;; Value available: remove, run backpressure relief, return directly.
+                      (let [val (buffer-protocol/remove! buf)]
+                        ;; Backpressure relief: Pull waiting put into now-empty slot.
+                        ;; Only the putter's commit is fulfilled; the active taker
+                        ;; returns val directly without its own commit.
+                        (loop []
+                          (when-let [putter (waiters/poll! puts)]
+                            (if (waiters/try-commit! putter true)
+                              (buffer-protocol/add! buf (waiters/get-value putter))
+                              (recur))))
+                        [:value val])
+                      ;; Buffer empty
+                      (if (.get closed)
+                        :closed
+                        ;; Must block: allocate now, enqueue, park after unlock.
+                        (let [commit (waiters/new-commit)
+                              waiter (waiters/->TakeWaiter commit)]
+                          (.add takes waiter)
+                          [:block commit waiter])))
+                    (finally
+                      (.unlock lock)))]
+      (if (vector? outcome)
+        (if (= (first outcome) :block)
+          ;; Phase 2: Park and wait for completion
+          (let [[_ commit waiter] outcome
+                ^csp_clj.channels.waiters.Commit commit commit
+                state (waiters/get-state commit)
+                final-state (if-not (nil? state)
+                              state
+                              (waiters/park-and-wait commit nil))]
+            (when (or (= final-state :timeout) (= final-state :interrupted))
+              (selectable-protocol/cancel-wait! this waiter))
+            (cond
+              (= final-state :interrupted) nil
+              (identical? final-state waiters/EOF) nil
+              :else final-state))
+          ;; [:value val]
+          (second outcome))
+        ;; :closed
+        nil)))
 
   (take! [this timeout-ms]
-    (let [commit (waiters/new-commit)
-          waiter (waiters/->TakeWaiter commit)]
-      (.lock lock)
-      (try
-        (if (> (buffer-protocol/size buf) 0)
-          (let [val (buffer-protocol/remove! buf)]
-            (waiters/try-commit! waiter val)
-            ;; Try to pull a waiting put into the now-empty buffer slot
-            (loop []
-              (when-let [putter (waiters/poll! puts)]
-                (if (waiters/try-commit! putter true)
-                  (buffer-protocol/add! buf (waiters/get-value putter))
-                  (recur))))
-            true)
-          (if (.get closed)
-            (do (waiters/try-commit! waiter waiters/EOF) false)
-            (do
-              (.add takes waiter)
-              false)))
-        (finally
-          (.unlock lock)))
-
-      (let [^csp_clj.channels.waiters.Commit commit commit
-            state (waiters/get-state commit)
-            final-state (if-not (nil? state)
-                          state
-                          (waiters/park-and-wait commit timeout-ms))]
-        (when (or (= final-state :timeout) (= final-state :interrupted))
-          (selectable-protocol/cancel-wait! this waiter))
-        (cond
-          (= final-state :interrupted) nil
-          (identical? final-state waiters/EOF) nil
-          :else final-state))))
+    (let [outcome (try
+                    (.lock lock)
+                    (if (> (buffer-protocol/size buf) 0)
+                      (let [val (buffer-protocol/remove! buf)]
+                        (loop []
+                          (when-let [putter (waiters/poll! puts)]
+                            (if (waiters/try-commit! putter true)
+                              (buffer-protocol/add! buf (waiters/get-value putter))
+                              (recur))))
+                        [:value val])
+                      (if (.get closed)
+                        :closed
+                        (let [commit (waiters/new-commit)
+                              waiter (waiters/->TakeWaiter commit)]
+                          (.add takes waiter)
+                          [:block commit waiter])))
+                    (finally
+                      (.unlock lock)))]
+      (if (vector? outcome)
+        (if (= (first outcome) :block)
+          (let [[_ commit waiter] outcome
+                ^csp_clj.channels.waiters.Commit commit commit
+                state (waiters/get-state commit)
+                final-state (if-not (nil? state)
+                              state
+                              (waiters/park-and-wait commit timeout-ms))]
+            (when (or (= final-state :timeout) (= final-state :interrupted))
+              (selectable-protocol/cancel-wait! this waiter))
+            (cond
+              (= final-state :interrupted) nil
+              (identical? final-state waiters/EOF) nil
+              :else final-state))
+          (second outcome))
+        nil)))
 
   (close! [_]
     (.lock lock)
