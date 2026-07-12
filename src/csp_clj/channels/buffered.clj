@@ -363,41 +363,48 @@
 
   ;; Register waiter for select! operation
   (wait! [_ waiter]
-    (.lock lock)
-    (try
-      (if (instance? csp_clj.channels.waiters.AltsTakeWaiter waiter)
-        ;; AltsTakeWaiter: Try to take from buffer
-        (if (> (buffer-protocol/size buf) 0)
-          ;; Lazy value extraction: Only remove from buffer on successful commit
-          (if (waiters/try-commit-fn! waiter #(buffer-protocol/remove! buf))
-            ;; Success: Refill buffer from waiting putters
-            (loop []
-              (when-let [putter (waiters/poll! puts)]
-                (if (waiters/try-commit! putter true)
-                  (buffer-protocol/add! buf (waiters/get-value putter))
-                  (recur))))
-            nil)
-          (if (.get closed)
-            (waiters/try-commit! waiter waiters/EOF)
-            (.add takes waiter)))
-        ;; AltsPutWaiter: Try to put to buffer or handoff
-        (if (.get closed)
-          (waiters/try-commit! waiter waiters/PUT_FAIL)
-          (if (loop []
-                (when-let [t (waiters/poll! takes)]
-                  (if (waiters/try-match! t waiter (waiters/get-value waiter))
-                    t
+    ;; If the alts commit is already fulfilled (an earlier wait!
+    ;; in the select! slow path matched a partner), return immediately
+    ;; without acquiring the lock or polling any queue. Otherwise the
+    ;; rendezvous loop below would drain the opposing queue via poll!
+    ;; while try-match! always returns false (alts commit non-nil),
+    ;; orphaning every polled waiter.
+    (when (nil? (waiters/get-state (waiters/get-commit waiter)))
+      (.lock lock)
+      (try
+        (if (instance? csp_clj.channels.waiters.AltsTakeWaiter waiter)
+          ;; AltsTakeWaiter: Try to take from buffer
+          (if (> (buffer-protocol/size buf) 0)
+            ;; Lazy value extraction: Only remove from buffer on successful commit
+            (if (waiters/try-commit-fn! waiter #(buffer-protocol/remove! buf))
+              ;; Success: Refill buffer from waiting putters
+              (loop []
+                (when-let [putter (waiters/poll! puts)]
+                  (if (waiters/try-commit! putter true)
+                    (buffer-protocol/add! buf (waiters/get-value putter))
                     (recur))))
-            true
-            (if-not (buffer-protocol/full? buf)
-              ;; Buffer has space: Try to commit then add to buffer
-              (if (waiters/try-commit! waiter true)
-                (buffer-protocol/add! buf (waiters/get-value waiter))
-                nil)
-              ;; Buffer full: Enqueue in puts
-              (.add puts waiter)))))
-      (finally
-        (.unlock lock))))
+              nil)
+            (if (.get closed)
+              (waiters/try-commit! waiter waiters/EOF)
+              (.add takes waiter)))
+          ;; AltsPutWaiter: Try to put to buffer or handoff
+          (if (.get closed)
+            (waiters/try-commit! waiter waiters/PUT_FAIL)
+            (if (loop []
+                  (when-let [t (waiters/poll! takes)]
+                    (if (waiters/try-match! t waiter (waiters/get-value waiter))
+                      t
+                      (recur))))
+              true
+              (if-not (buffer-protocol/full? buf)
+                ;; Buffer has space: Try to commit then add to buffer
+                (if (waiters/try-commit! waiter true)
+                  (buffer-protocol/add! buf (waiters/get-value waiter))
+                  nil)
+                ;; Buffer full: Enqueue in puts
+                (.add puts waiter)))))
+        (finally
+          (.unlock lock)))))
 
   ;; Remove waiter from queue (timeout or interrupt handling)
   (cancel-wait! [_ waiter]

@@ -319,31 +319,38 @@
 
   ;; Register waiter for select! operation
   (wait! [_ waiter]
-    (.lock lock)
-    (try
-      (if (instance? csp_clj.channels.waiters.AltsTakeWaiter waiter)
-        ;; AltsTakeWaiter: Try to find a matching putter
-        (if (loop []
-              (when-let [p (waiters/poll! puts)]
-                (if (waiters/try-match! waiter p (waiters/get-value p))
-                  p
-                  (recur))))
-          true
-          (if (.get closed)
-            (waiters/try-commit! waiter waiters/EOF)
-            (.add takes waiter)))
-        ;; AltsPutWaiter: Try to find a matching taker
-        (if (.get closed)
-          (waiters/try-commit! waiter waiters/PUT_FAIL)
+    ;; If the alts commit is already fulfilled (an earlier wait!
+    ;; in the select! slow path matched a partner), return immediately
+    ;; without acquiring the lock or polling any queue. Otherwise the
+    ;; rendezvous loop below would drain the opposing queue via poll!
+    ;; while try-match! always returns false (alts commit non-nil),
+    ;; orphaning every polled waiter.
+    (when (nil? (waiters/get-state (waiters/get-commit waiter)))
+      (.lock lock)
+      (try
+        (if (instance? csp_clj.channels.waiters.AltsTakeWaiter waiter)
+          ;; AltsTakeWaiter: Try to find a matching putter
           (if (loop []
-                (when-let [t (waiters/poll! takes)]
-                  (if (waiters/try-match! t waiter (waiters/get-value waiter))
-                    t
+                (when-let [p (waiters/poll! puts)]
+                  (if (waiters/try-match! waiter p (waiters/get-value p))
+                    p
                     (recur))))
             true
-            (.add puts waiter))))
-      (finally
-        (.unlock lock))))
+            (if (.get closed)
+              (waiters/try-commit! waiter waiters/EOF)
+              (.add takes waiter)))
+          ;; AltsPutWaiter: Try to find a matching taker
+          (if (.get closed)
+            (waiters/try-commit! waiter waiters/PUT_FAIL)
+            (if (loop []
+                  (when-let [t (waiters/poll! takes)]
+                    (if (waiters/try-match! t waiter (waiters/get-value waiter))
+                      t
+                      (recur))))
+              true
+              (.add puts waiter))))
+        (finally
+          (.unlock lock)))))
 
   ;; Remove waiter from queue (timeout or interrupt handling)
   (cancel-wait! [_ waiter]
