@@ -302,7 +302,50 @@
               ch2 (channels/create)]
 
           (is (= [nil :other :timeout] (channels/select! [[ch1 :take] [ch2 :take]] {:timeout 50}))
-              "===> returns timeout vector"))))))
+              "===> returns timeout vector"))))
+
+    (testing "=> orphaned waiters"
+
+      (testing "==> losing channel putters are not orphaned by zombie waiters"
+        ;; When select! matches on one channel, the AltsWaiter for the
+        ;; other channel has an already-fulfilled commit.  Without the
+        ;; early-return guard, its wait! rendezvous loop drains the
+        ;; opposing queue (polling but never fulfilling), orphaning
+        ;; every polled waiter.  With the fix, the losing channel's
+        ;; putter stays alive in the queue and can be woken by close!.
+        (let [ch1 (channels/create)
+              ch2 (channels/create)
+              putter1-done (promise)
+              putter2-done (promise)]
+
+          (future
+            (channels/put! ch1 :v1)
+            (deliver putter1-done :done))
+          (future
+            (channels/put! ch2 :v2)
+            (deliver putter2-done :done))
+
+          ;; Let both putters enter their puts queues
+          (Thread/sleep 50)
+
+          (is (= 1 (.size ^java.util.ArrayDeque (:puts ch1)))
+              "===> putter on ch1 is waiting")
+          (is (= 1 (.size ^java.util.ArrayDeque (:puts ch2)))
+              "===> putter on ch2 is waiting")
+
+          ;; select! matches exactly one putter.  The other must remain alive.
+          (channels/select! [[ch1 :take] [ch2 :take]])
+
+          ;; Close both channels to wake any remaining waiters
+          (channels/close! ch1)
+          (channels/close! ch2)
+
+          ;; Both putters must have completed — the losing putter was NOT
+          ;; orphaned by a zombie waiter draining the queue without fulfilling.
+          (is (= :done (deref putter1-done 5000 :orphaned))
+              "===> putter1 completed (not orphaned)")
+          (is (= :done (deref putter2-done 5000 :orphaned))
+              "===> putter2 completed (not orphaned)"))))))
 
 (deftest ^:functional select!-fairness-tests
 
