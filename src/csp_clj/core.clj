@@ -232,7 +232,7 @@ Options:
   "Registers a tap channel on a multiplexer.
    
    When the multiplexer's source channel receives a value, it will be
-   put! onto all registered tap channels concurrently.
+   put! onto all registered tap channels.
    
    Parameters:
      - mult: the multiplexer

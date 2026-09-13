@@ -139,6 +139,13 @@
   (commit-val [_ val] [channel :put (not (identical? val PUT_FAIL))])
   (get-value [_] value))
 
+;; Result of the blocking path of take!. take-outcome! returns the taken value
+;; directly on the fast path (values are never nil; put! rejects nil), nil for
+;; EOF, and a Blocked instance when the caller must park. The distinct type
+;; lets take! tell a parked result apart from an arbitrary user value, which
+;; may itself be a vector or a keyword such as :closed or :block.
+(defrecord Blocked [^Commit commit waiter])
+
 (defn poll!
   "Extracts and removes the first element from a queue.
 
@@ -168,20 +175,45 @@
         ;; Already completed by another thread or timeout/interrupt
         false))))
 
-(defn try-commit-fn!
-  "Atomically attempt to fulfill a single waiter with a value provided by a thunk.
-   The thunk is ONLY evaluated if the commit is successfully locked and pending.
-   Returns true if successful."
-  [waiter val-fn]
-  ;; Same locking strategy as try-commit!
+(defn commit-first!
+  "Polls q until it finds a pending waiter, commits it with val, and returns
+   that waiter. Already-completed waiters are discarded. Returns nil if the
+   queue is drained without a successful commit.
+
+   The caller must hold the channel lock."
+  [^java.util.Queue q val]
+  (loop []
+    (when-let [w (.poll q)]
+      (if (try-commit! w val)
+        w
+        (recur)))))
+
+(defn commit-all!
+  "Commits every waiter currently in q with val (best effort; already-completed
+   waiters are discarded), draining the queue. Used by close! to wake all
+   blocked takers/putters.
+
+   The caller must hold the channel lock."
+  [^java.util.Queue q val]
+  (loop []
+    (when-let [w (.poll q)]
+      (try-commit! w val)
+      (recur))))
+
+(defn try-commit-with!
+  "Like try-commit! but computes the committed value as (f x). (f x) is only
+   evaluated if the commit is still pending, so callers do not need to allocate
+   a thunk.
+
+   The caller must hold the channel lock."
+  [waiter f x]
   (let [^Commit c (get-commit waiter)]
     (locking c
-      ;; Lazy evaluation: Only call val-fn if we will actually use the result
       (if (nil? (get-state c))
         (do
-          ;; Evaluate thunk under lock, then transform and store
+          ;; Evaluate (f x) under lock, then transform and store.
           ;; Use case: AltsTakeWaiter removing from buffer only on successful commit
-          (set-state! c (commit-val waiter (val-fn)))
+          (set-state! c (commit-val waiter (f x)))
           (LockSupport/unpark (.-thread c))
           true)
         false))))
@@ -215,6 +247,32 @@
                 true)
               ;; One or both already completed (race condition)
               false)))))))
+
+(defn match-putter!
+  "Poll puts until a live putter is matched against the AltsTakeWaiter, and
+   return that putter. Already-completed putters are discarded. Returns nil if
+   the queue is drained.
+
+   The caller must hold the channel lock."
+  [^java.util.Queue puts waiter]
+  (loop []
+    (when-let [p (.poll puts)]
+      (if (try-match! waiter p (get-value p))
+        p
+        (recur)))))
+
+(defn match-taker!
+  "Poll takes until a live taker is matched against the AltsPutWaiter, and
+   return that taker. Already-completed takers are discarded. Returns nil if
+   the queue is drained.
+
+   The caller must hold the channel lock."
+  [^java.util.Queue takes waiter]
+  (loop []
+    (when-let [t (.poll takes)]
+      (if (try-match! t waiter (get-value waiter))
+        t
+        (recur)))))
 
 (defn park-and-wait
   "Parks the current virtual thread until the commit state is no longer nil.

@@ -12,6 +12,8 @@ Key differences from core.async:
 - **Explicit API**: No macros or hidden state machines—just function calls  
 - **Named operations**: `multiplex` instead of `mult`, `select` instead of `alts` to indicate behavioral differences
 
+See [CHANGELOG.md](CHANGELOG.md) for the latest performance and correctness updates.
+
 ## Installation
 
 Lein:
@@ -406,7 +408,7 @@ This example shows one producer distributing work to two consumers in round-robi
 
 A multiplexer (mult) implements the broadcast pattern where every value from a source channel is distributed to **all** registered tap channels. This is useful for scenarios like log replication, event broadcasting, or sending data to multiple sinks.
 
-Unlike core.async mult/tap which processes taps sequentially, csp-clj multiplex dispatches to all taps **in parallel** using virtual threads. Each tap receives the value concurrently.
+Unlike core.async mult/tap, csp-clj dispatches each value to taps **sequentially** on the dispatcher thread using blocking `put!`s. Every tap still receives every value in order, and if any tap blocks (buffer full or unbuffered with no taker) the whole mult blocks, applying strict backpressure to the source.
 
 #### Creating a Multiplexer
 

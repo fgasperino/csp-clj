@@ -197,6 +197,12 @@
    This matters for stateful transducers (partition-all, dedupe, etc.)
    that maintain state across inputs.
 
+   VALUE HANDLING
+
+   nil taken from the input channel signals EOF (channel closed). Boolean
+   false is a legal value and is passed through like any other value.
+   nil results produced by the transducer are skipped.
+
    EXCEPTION HANDLING
 
    Both ingress and egress threads catch Throwable (not just Exception).
@@ -248,7 +254,9 @@
       ;; Preserved semantics (same as the n>1 path):
       ;; - Output order matches input order (trivially — single thread).
       ;; - Transducer applied to [v] (single-element vector).
-      ;; - Nil results from transducer are skipped.
+      ;; - nil from `from` is EOF; boolean false is a legal value and passes
+      ;;   through (only nil terminates the input loop).
+      ;; - Nil results from the transducer are skipped.
       ;; - :close? controls whether `to` is closed when `from` closes.
       ;; - :ex-handler is called on transducer exceptions; the loop continues.
       ;; - Early termination: if put! to `to` returns false (output closed),
@@ -260,19 +268,23 @@
           (try
             (loop []
               (let [v (channel-protocol/take! from)]
-                (when v
-                  (try
-                    (let [results (into [] xf [v])]
-                      (loop [rs (seq results)
-                             keep-going? true]
-                        (when (and rs keep-going?)
-                          (let [r (first rs)]
-                            (if (nil? r)
-                              (recur (next rs) true)
-                              (recur (next rs) (channel-protocol/put! to r)))))))
-                    (catch Throwable e
-                      (ex-handler e)))
-                  (recur))))
+                (when-not (nil? v)
+                  (let [results (try
+                                  (into [] xf [v])
+                                  (catch Throwable e
+                                    (ex-handler e)
+                                    []))
+                        keep-going? (loop [rs (seq results)]
+                                      (if rs
+                                        (let [r (first rs)]
+                                          (if (nil? r)
+                                            (recur (next rs))
+                                            (if (channel-protocol/put! to r)
+                                              (recur (next rs))
+                                              false)))
+                                        true))]
+                    (when keep-going?
+                      (recur))))))
             (finally
               (when close?
                 (channel-protocol/close! to))))))

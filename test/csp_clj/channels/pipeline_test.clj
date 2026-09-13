@@ -320,3 +320,114 @@
                  (pr-str @thread-names)))
 
         (.shutdown custom-exec)))))
+
+(deftest ^:functional pipeline-single-thread-tests
+
+  (testing "n=1 fast path (single virtual thread, no jobs channel)"
+
+    (testing "=> preserves order and passes boolean false through"
+
+      ;; Regression: the n=1 loop must only treat nil as EOF, never false.
+      ;; Parameterized over n=1 and n=2 so the two paths cannot diverge.
+      (doseq [n [1 2]]
+        (let [from (csp/channel 10)
+              to (csp/channel 10)]
+
+          (csp/into-chan! from [1 false 3])
+          (csp/pipeline n to (map identity) from)
+
+          (is (= 1 (csp/take! to 500)) (str "===> n=" n " takes 1"))
+          (is (false? (csp/take! to 500)) (str "===> n=" n " takes false"))
+          (is (= 3 (csp/take! to 500)) (str "===> n=" n " takes 3"))
+          (is (nil? (csp/take! to 500)) (str "===> n=" n " takes EOF")))))
+
+    (testing "=> multiple outputs per input (mapcat)"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)]
+
+        (csp/into-chan! from [1 2 3])
+        (csp/pipeline 1 to (mapcat #(range %)) from)
+
+        (is (= 0 (csp/take! to 500)) "===> takes 0")
+        (is (= 0 (csp/take! to 500)) "===> takes 0")
+        (is (= 1 (csp/take! to 500)) "===> takes 1")
+        (is (= 0 (csp/take! to 500)) "===> takes 0")
+        (is (= 1 (csp/take! to 500)) "===> takes 1")
+        (is (= 2 (csp/take! to 500)) "===> takes 2")
+        (is (nil? (csp/take! to 500)) "===> takes nil")))
+
+    (testing "=> zero outputs per input (filter)"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)]
+
+        (csp/into-chan! from [1 2 3 4 5])
+        (csp/pipeline 1 to (filter even?) from)
+
+        (is (= 2 (csp/take! to 500)) "===> takes 2")
+        (is (= 4 (csp/take! to 500)) "===> takes 4")
+        (is (nil? (csp/take! to 500)) "===> takes nil")))
+
+    (testing "=> early termination when output is closed"
+
+      ;; Regression: the n=1 loop previously ignored the put! false result and
+      ;; kept draining the input. It must stop as soon as `to` is closed.
+      (let [from (csp/channel 15)
+            to (csp/channel 2)
+            processed (atom [])
+            xf (map (fn [x]
+                      (swap! processed conj x)
+                      x))]
+
+        (csp/into-chan! from [1 2 3 4 5 6 7 8 9 10] false)
+        (csp/pipeline 1 to xf from)
+
+        (is (= 1 (csp/take! to 500)) "===> takes 1")
+
+        (csp/close! to)
+        (Thread/sleep 100)
+
+        ;; Bounded backpressure: 1 taken + 2 buffered + 1 in-flight at most,
+        ;; so far fewer than the 10 available inputs should be processed.
+        (is (< (count @processed) 10)
+            "===> didn't process everything after 'to' was closed")))
+
+    (testing "=> transducer exception calls :ex-handler and continues"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)
+            errors (atom [])
+            xf (map (fn [x]
+                      (if (= x 2)
+                        (throw (RuntimeException. "fail on 2"))
+                        x)))]
+
+        (csp/into-chan! from [1 2 3])
+        (csp/pipeline 1 to xf from
+                      {:ex-handler (fn [e]
+                                     (swap! errors conj (.getMessage e)))})
+
+        (is (= 1 (csp/take! to 500)) "===> takes 1")
+        (is (= 3 (csp/take! to 500)) "===> takes 3 (skipped 2)")
+        (is (nil? (csp/take! to 500)) "===> takes nil")
+        (is (= ["fail on 2"] @errors) "===> captured exception message")))
+
+    (testing "=> :close? false leaves output open"
+
+      (let [from (csp/channel 10)
+            to (csp/channel 10)]
+
+        (csp/into-chan! from [1 2])
+        (csp/pipeline 1 to (map inc) from {:close? false})
+
+        (is (= 2 (csp/take! to 500)) "===> takes 2")
+        (is (= 3 (csp/take! to 500)) "===> takes 3")
+
+        (Thread/sleep 50)
+
+        (is (false? (csp/closed? to)) "===> to channel remains open")
+
+        (csp/put! to 99)
+
+        (is (= 99 (csp/take! to 500)) "===> can still put to to channel")))))
