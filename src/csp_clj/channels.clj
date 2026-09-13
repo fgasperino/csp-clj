@@ -140,7 +140,7 @@
 (defn multiplex
   "Creates and returns a mult(iplexer) for the given source channel.
    A mult runs a background virtual thread that continually reads from
-   the source channel and distributes each value concurrently to all
+   the source channel and distributes each value to all
    registered taps (channels).
 
    If the source channel blocks, the mult thread blocks.

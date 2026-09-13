@@ -166,6 +166,29 @@
           (is (true? (channels/put! ch false)) "===> put! returns true on success")
           (is (false? (channels/take! ch)) "===> false transferred successfully"))))
 
+    (testing "=> arbitrary value shapes round-trip unchanged"
+
+      ;; Regression: take! must not misinterpret a user value that happens to
+      ;; look like an internal marker (e.g. a vector whose first element is
+      ;; :block, which used to be treated as the blocking result).
+      (let [values [[:block :x :y] [:value :x] [:value nil] :closed :block :timeout]]
+
+        (testing "==> buffered channel"
+
+          (let [ch (channels/create 10)]
+            (doseq [v values]
+              (is (true? (channels/put! ch v)))
+              (is (= v (channels/take! ch 500))
+                  (str "===> round-trips " (pr-str v))))))
+
+        (testing "==> unbuffered channel"
+
+          (let [ch (channels/create)]
+            (doseq [v values]
+              (future (channels/put! ch v))
+              (is (= v (channels/take! ch 500))
+                  (str "===> round-trips " (pr-str v))))))))
+
     (testing "=> blocked put! aborts correctly"
 
       (testing "==> put! returns false when channel closed while blocked"

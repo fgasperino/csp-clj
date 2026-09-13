@@ -30,30 +30,63 @@
           (is (= :world (channels/take! tap1 100)) "===> tap1 received second")
           (is (= :world (channels/take! tap2 100)) "===> tap2 received second"))))
 
-    (testing "=> Phaser backpressure: mult waits for all taps via arriveAndAwaitAdvance"
+    (testing "=> strict backpressure: mult waits for all taps before the next value"
 
-      (let [source (channels/create)
-            m (channels/multiplex source)
-            ;; Unbuffered channels mean they block until someone takes
+      ;; Dispatch is sequential, so which tap is served first is unspecified.
+      ;; Verify the backpressure guarantee order-agnostically: the mult must
+      ;; not take value N+1 from the source until every tap has accepted N.
+      (let [taken (atom 0)
+            real-source (channels/create 10)
+            counting-source (reify channel-protocol/Channel
+                              (take! [_]
+                                (let [v (channel-protocol/take! real-source)]
+                                  (when (some? v)
+                                    (swap! taken inc))
+                                  v))
+                              (take! [_ t]
+                                (channel-protocol/take! real-source t))
+                              (put! [_ v]
+                                (channel-protocol/put! real-source v))
+                              (put! [_ v t]
+                                (channel-protocol/put! real-source v t))
+                              (close! [_]
+                                (channel-protocol/close! real-source))
+                              (closed? [_]
+                                (channel-protocol/closed? real-source)))
+            m (channels/multiplex counting-source)
             tap1 (channels/create)
             tap2 (channels/create)]
 
         (channels/tap! m tap1)
         (channels/tap! m tap2)
 
-        (testing "==> Phaser arriveAndAwaitAdvance blocks until all tap futures complete"
+        ;; Two values are available in the buffered source
+        (channel-protocol/put! real-source 1)
+        (channel-protocol/put! real-source 2)
 
-          (future
-            (channels/put! source 1)
-            (channels/put! source 2))
+        (Thread/sleep 50)
 
-          (Thread/sleep 50)
+        (is (= 1 @taken)
+            "===> only value 1 is taken while the first tap is blocked")
 
-          (is (= 1 (channels/take! tap1 100)) "===> tap1 gets 1")
-          (is (= :timeout (channels/take! tap1 100)) "===> tap1 doesn't get 2 yet")
-          (is (= 1 (channels/take! tap2 100)) "===> tap2 gets 1")
-          (is (= 2 (channels/take! tap1 100)) "===> tap1 gets 2")
-          (is (= 2 (channels/take! tap2 100)) "===> tap2 gets 2"))))
+        ;; Consume from both taps concurrently (order-agnostic)
+        (let [f1 (future (channels/take! tap1 1000))
+              f2 (future (channels/take! tap2 1000))]
+          (is (= 1 @f1) "===> tap1 gets value 1")
+          (is (= 1 @f2) "===> tap2 gets value 1"))
+
+        (Thread/sleep 50)
+
+        (is (= 2 @taken)
+            "===> value 2 is taken only after both taps accepted value 1")
+
+        ;; Drain value 2, then close so the dispatcher exits
+        (let [f1 (future (channels/take! tap1 1000))
+              f2 (future (channels/take! tap2 1000))]
+          (is (= 2 @f1) "===> tap1 gets value 2")
+          (is (= 2 @f2) "===> tap2 gets value 2"))
+
+        (channels/close! real-source)))
 
     (testing "=> closing semantics"
 
@@ -201,32 +234,48 @@
 
 (deftest ^:unit multiplex-error-handling-tests
 
-  (testing "ex-handler that throws does not prevent cleanup"
+  (testing "dispatch-loop error runs ex-handler and cleans up"
 
-    (testing "=> executor rejection triggers ex-handler, cleanup still runs"
-      (let [source (channels/create)
+    (testing "=> source take! throwing triggers ex-handler, cleanup, and tap close"
+      (let [call-count (atom 0)
+            real-source (channels/create 10)
+            ;; Source that yields a value on the first take! and then throws,
+            ;; forcing the dispatch-loop's outer catch without relying on the
+            ;; internal executor (an implementation detail).
+            throwing-source (reify channel-protocol/Channel
+                              (take! [_]
+                                (let [n (swap! call-count inc)]
+                                  (if (> n 1)
+                                    (throw (RuntimeException. "source exploded"))
+                                    (channel-protocol/take! real-source))))
+                              (take! [_ timeout-ms]
+                                (channel-protocol/take! real-source timeout-ms))
+                              (put! [_ v]
+                                (channel-protocol/put! real-source v))
+                              (put! [_ v t]
+                                (channel-protocol/put! real-source v t))
+                              (close! [_]
+                                (channel-protocol/close! real-source))
+                              (closed? [_]
+                                (channel-protocol/closed? real-source)))
             handler-called (atom false)
-            m (channels/multiplex source
+            m (channels/multiplex throwing-source
                                   {:ex-handler (fn [_]
                                                  (reset! handler-called true)
-                                                 (throw (RuntimeException. "ex-handler boom")))})]
+                                                 ;; Throwing here must not skip cleanup
+                                                 (throw (RuntimeException. "ex-handler boom")))})
+            tap-ch (channels/create 10)]
 
-        ;; Add TWO taps so the dispatch loop uses the multi-tap executor path
-        ;; (the single-tap fast path bypasses the executor entirely).
-        (let [tap-ch (channels/create 10)
-              tap-ch2 (channels/create 10)]
-          (channels/tap! m tap-ch)
-          (channels/tap! m tap-ch2)
+        ;; Seed a value so the first take! returns and the second throws
+        (channel-protocol/put! real-source :first)
+        (channels/tap! m tap-ch)
 
-          ;; Shut down the multiplexer's executor to cause RejectedExecutionException
-          (.shutdownNow ^java.util.concurrent.ExecutorService (:executor m))
-
-          ;; Put a value into source — dispatch loop takes it,
-          ;; tries to execute on shut-down executor → throws → outer catch
-          (channels/put! source :value)
-          (Thread/sleep 100))
+        (Thread/sleep 100)
 
         (is @handler-called "===> ex-handler was called")
+        (is (channels/closed? tap-ch) "===> close?=true tap closed during cleanup")
+        (is (= 0 (.size ^java.util.concurrent.ConcurrentHashMap (:taps m)))
+            "===> multiplexer cleaned up taps")
 
         ;; After cleanup, tapping should immediately close the channel
         (let [late-tap (channels/create)]
@@ -234,4 +283,66 @@
           (is (channels/closed? late-tap)
               "===> late tap closed (cleanup ran despite ex-handler throwing)")
           (is (= 0 (.size ^java.util.concurrent.ConcurrentHashMap (:taps m)))
-              "===> multiplexer cleaned up taps"))))))
+              "===> multiplexer holds no late tap"))))))
+
+(deftest ^:functional multiplex-sequential-dispatch-tests
+
+  (testing "sequential dispatch"
+
+    (testing "=> all unbuffered taps receive every value in order"
+
+      ;; Consumers start first so the sequentially-dispatched puts can be
+      ;; accepted in whatever order the tap snapshot happens to iterate.
+      (let [source (channels/create 50)
+            m (channels/multiplex source)
+            taps (vec (repeatedly 3 channels/create))]
+
+        (doseq [t taps]
+          (channels/tap! m t))
+
+        (let [results (mapv (fn [t]
+                              (future
+                                (vec (repeatedly 5 #(channels/take! t 1000)))))
+                            taps)]
+          (doseq [i (range 5)]
+            (channels/put! source i))
+          (channels/close! source)
+          (doseq [r results]
+            (is (= [0 1 2 3 4] @r)
+                "===> tap received all values in order")))))
+
+    (testing "=> untap mid-stream stops delivery without hanging"
+
+      (let [source (channels/create)
+            m (channels/multiplex source)
+            t1 (channels/create 10)
+            t2 (channels/create 10)]
+
+        (channels/tap! m t1)
+        (channels/tap! m t2)
+
+        (channels/untap! m t1)
+        (channels/put! source :only-t2)
+
+        (is (= :timeout (channels/take! t1 100)) "===> t1 no longer receives")
+        (is (= :only-t2 (channels/take! t2 200)) "===> t2 still receives")
+
+        (channels/close! source)))
+
+    (testing "=> per-tap order preserved with many taps"
+
+      (let [source (channels/create 50)
+            m (channels/multiplex source)
+            taps (vec (repeatedly 20 #(channels/create 50)))]
+
+        (doseq [t taps]
+          (channels/tap! m t))
+
+        (doseq [i (range 10)]
+          (channels/put! source i))
+        (channels/close! source)
+
+        (doseq [t taps]
+          (is (= (range 10)
+                 (vec (repeatedly 10 #(channels/take! t 500))))
+              "===> each tap receives all values in order"))))))
