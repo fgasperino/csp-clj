@@ -5,7 +5,7 @@ This project is now configured as a Clojure library using **tools.build**.
 ## Library Information
 
 - **Coordinates**: `org.clojars.fgasperino/csp-clj`
-- **Version**: `0.0.2`
+- **Version**: `0.0.3`
 - **License**: EPL-2.0 (Eclipse Public License v2.0)
 - **Developer**: Franco Gasperino <franco.gasperino@gmail.com>
 - **Repository**: https://github.com/fgasperino/csp-clj
@@ -18,7 +18,7 @@ All build tasks are run via the `:build` alias:
 # Display library information
 clj -T:build info
 
-# Build the JAR file (creates target/csp-clj-0.0.2.jar)
+# Build the JAR file (creates target/csp-clj-0.0.3.jar)
 clj -T:build jar
 
 # Install to local Maven repository (~/.m2)
@@ -63,7 +63,7 @@ https://clojars.org/org.clojars.fgasperino/csp-clj
 Users can add it to their `deps.edn`:
 
 ```clojure
-{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.2"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.3"}}}
 ```
 
 ## Files Changed/Created
@@ -76,7 +76,7 @@ Users can add it to their `deps.edn`:
 
 To release a new version:
 
-1. Update the version in `build.clj` (line 5)
+1. Update the version in `build.clj` (line 6)
 2. Update the version in `deps.edn` (line 2) - optional but recommended
 3. Commit your changes
 4. Build and deploy:
@@ -90,7 +90,7 @@ After running `clj -T:build install`, you can test the library in another projec
 
 ```clojure
 ;; In another project's deps.edn
-{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.2"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.3"}}}
 ```
 
 The dependency will resolve from your local `~/.m2` repository.
