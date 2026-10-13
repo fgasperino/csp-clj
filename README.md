@@ -19,13 +19,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the latest performance and correctness upda
 Lein:
 
 ```clojure
-[org.clojars.fgasperino/csp-clj "0.0.3"]
+[org.clojars.fgasperino/csp-clj "0.1.0"]
 ```
 
 deps.edn:
 
 ```clojure
-{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.0.3"}}}
+{:deps {org.clojars.fgasperino/csp-clj {:mvn/version "0.1.0"}}}
 ```
 
 ## Requirements

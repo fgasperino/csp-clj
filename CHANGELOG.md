@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.0.3] - 2026-10-12
+## [0.1.0] - 2026-10-12
 
 Performance and correctness pass across channels, the multiplexer, and the
 pipeline. No public API changes.
@@ -154,7 +154,7 @@ Initial release.
 - JDK 24 or later (for virtual thread support).
 - Clojure 1.12.4.
 
-[Unreleased]: https://github.com/fgasperino/csp-clj/compare/0.0.3...HEAD
-[0.0.3]: https://github.com/fgasperino/csp-clj/compare/0.0.2...0.0.3
+[Unreleased]: https://github.com/fgasperino/csp-clj/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/fgasperino/csp-clj/compare/0.0.2...0.1.0
 [0.0.2]: https://github.com/fgasperino/csp-clj/compare/0.0.1...0.0.2
 [0.0.1]: https://github.com/fgasperino/csp-clj/releases/tag/0.0.1
